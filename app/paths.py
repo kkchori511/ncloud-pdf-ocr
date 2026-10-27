@@ -1,0 +1,20 @@
+import sys
+from pathlib import Path
+
+
+def resource_dir() -> Path:
+    """번들된 리소스(app/web 등)의 기준 폴더."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent.parent
+
+
+def data_dir() -> Path:
+    """설정 파일을 둘 폴더: exe 옆, 개발 중에는 프로젝트 루트."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def web_dir() -> Path:
+    return resource_dir() / "app" / "web"
