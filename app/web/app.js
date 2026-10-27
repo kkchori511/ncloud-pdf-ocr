@@ -41,10 +41,11 @@
     return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
   }
 
-  // ---------- 모달 ----------
-  function modal(message, withCancel) {
+  // ---------- 확인 창 ----------
+  function modal(message, withCancel, html) {
     return new Promise((resolve) => {
-      $('modalMsg').textContent = message;
+      if (html) $('modalMsg').innerHTML = message;
+      else $('modalMsg').textContent = message;
       $('modalCancel').hidden = !withCancel;
       $('modal').hidden = false;
       const done = (v) => {
@@ -59,14 +60,76 @@
   const alertBox = (m) => modal(m, false);
   const confirmBox = (m) => modal(m, true);
 
+  // ---------- 진행 창 ----------
+  const JOBS = {
+    stage1: {
+      title: '1단계 진행 중',
+      steps: [
+        { key: 'split', label: 'PDF 분할' },
+        { key: 'ocr', label: 'OCR', unit: '구간' },
+        { key: 'refine', label: '정제', unit: '명' },
+      ],
+    },
+    transform: { title: '2단계 변환 중', steps: [{ key: 'transform', label: '변환', unit: '명' }] },
+  };
+  let progTimer = null;
+  let progJob = null;
+
+  function openProgress(job) {
+    progJob = JOBS[job];
+    $('progTitle').textContent = progJob.title;
+    const ul = $('progSteps');
+    ul.innerHTML = '';
+    progJob.steps.forEach((s) => {
+      ul.appendChild(el('li', { class: 'step', 'data-step': s.key }, [
+        el('span', { class: 'step-icon' }),
+        el('span', { class: 'step-label', text: s.label }),
+        el('span', { class: 'step-text' }),
+        el('div', { class: 'bar' }, [el('div', { class: 'bar-fill' })]),
+      ]));
+    });
+    const start = Date.now();
+    const tick = () => {
+      const sec = Math.floor((Date.now() - start) / 1000);
+      $('progTime').textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    };
+    tick();
+    clearInterval(progTimer);
+    progTimer = setInterval(tick, 1000);
+    $('stopBtn').disabled = false;
+    $('stopBtn').textContent = '중지';
+    $('progress').hidden = false;
+  }
+  function closeProgress() {
+    clearInterval(progTimer);
+    $('progress').hidden = true;
+  }
+  function updateStep(ev) {
+    const li = document.querySelector(`.step[data-step="${ev.key}"]`);
+    if (!li) return;
+    // 앞 단계는 모두 완료로 표시
+    let prev = li.previousElementSibling;
+    while (prev) { prev.classList.remove('active'); prev.classList.add('done'); prev = prev.previousElementSibling; }
+    li.classList.toggle('active', ev.state === 'active');
+    li.classList.toggle('done', ev.state === 'done');
+    const def = progJob.steps.find((s) => s.key === ev.key) || {};
+    const text = li.querySelector('.step-text');
+    const fill = li.querySelector('.bar-fill');
+    if (ev.total) {
+      text.textContent = `${ev.done}/${ev.total}${def.unit || ''}`;
+      fill.style.width = `${Math.round((ev.done / ev.total) * 100)}%`;
+    } else {
+      text.textContent = ev.text || (ev.state === 'done' ? '완료' : '진행 중…');
+      fill.style.width = ev.state === 'done' ? '100%' : '30%';
+    }
+  }
+
   // ---------- 상태 표시 ----------
   function setStatus(kind, text) {
     const s = $('status');
     s.hidden = !text;
     s.className = 'status' + (kind === 'error' ? ' error' : '');
-    s.innerHTML = '';
-    if (kind === 'progress') s.appendChild(el('span', { class: 'spinner' }));
-    s.appendChild(document.createTextNode(text || ''));
+    s.textContent = text || '';
   }
   function setBusy(v) {
     busy = v;
@@ -81,6 +144,14 @@
     if (!cfg.openrouter_key) { setCredits(undefined, null); return; }
     const r = await api.balance();
     setCredits(undefined, r.balance);
+  }
+
+  // ---------- 화면 전환 ----------
+  function showPanel(name) {
+    document.querySelectorAll('.menu-btn[data-panel]').forEach((x) => x.classList.toggle('active', x.dataset.panel === name));
+    document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.dataset.panelContent === name));
+    window.scrollTo(0, 0);
+    if (name === 'main') requestAnimationFrame(sizePromptAreas);
   }
 
   // ---------- 설정 ----------
@@ -115,15 +186,18 @@
 
   async function showPrice(row) {
     const input = row.querySelector('.model-input');
-    const price = row.querySelector('.price');
+    const main = row.querySelector('.price-main');
+    const sub = row.querySelector('.price-sub');
     const id = input.value.trim();
-    price.classList.remove('error');
-    if (!id) { price.textContent = '모델을 입력해 주세요.'; return; }
-    price.textContent = '단가 확인 중…';
+    row.querySelector('.price').classList.remove('error');
+    sub.textContent = '';
+    if (!id) { main.textContent = '모델을 입력해 주세요'; return; }
+    main.textContent = '단가 확인 중…';
     const r = await api.model_info(id);
     if (!r.ok) {
-      price.classList.add('error');
-      price.textContent = r.error;
+      row.querySelector('.price').classList.add('error');
+      main.textContent = '모델을 찾지 못했습니다';
+      sub.textContent = r.error;
       return;
     }
     if (input.value.trim() !== r.id) {
@@ -131,7 +205,8 @@
       updateCfg({ [row.dataset.model]: r.id });
     }
     const p = (v) => (v === null || v === undefined ? '?' : v.toFixed(v < 1 ? 3 : 2));
-    price.textContent = `${r.name} · 입력 ${p(r.prompt_per_m)} / 출력 ${p(r.completion_per_m)} 크레딧 (100만 토큰당)`;
+    main.textContent = `입력 ${p(r.prompt_per_m)} / 출력 ${p(r.completion_per_m)} 크레딧`;
+    sub.textContent = `100만 토큰당 - ${r.name}`;
   }
 
   function bindSettings() {
@@ -171,7 +246,7 @@
       r.addEventListener('change', () => updateCfg({ refine_mode: r.value }));
     });
     $('resetKeysBtn').addEventListener('click', async () => {
-      if (!(await confirmBox('저장된 키 3개(CLOVA URL, CLOVA Secret Key, OpenRouter 키)를 모두 지울까요?\n프롬프트와 모델 설정은 남습니다.'))) return;
+      if (!(await confirmBox('저장된 키 3개(CLOVA Secret Key, CLOVA Invoke URL, OpenRouter 키)를 모두 지울까요?\n프롬프트와 모델 설정은 남습니다.'))) return;
       await api.reset_keys();
       cfg = await api.load_config();
       fillSettings();
@@ -193,24 +268,46 @@
         onclick: () => { updateCfg({ active_tab: i }); renderPromptTabs(); },
       }));
     });
-    const cur = tabs[cfg.active_tab] || { name: '', prompt: '' };
-    $('tabName').value = cur.name;
-    $('tabPrompt').value = cur.prompt;
+    const cur = tabs[cfg.active_tab] || {};
+    $('tabName').value = cur.name || '';
+    $('tabPrompt').value = cur.prompt || '';
+    $('tabExample').value = cur.example || '';
+    updateExampleBytes();
+  }
+  function updateExampleBytes() {
+    const v = $('tabExample').value;
+    $('exampleBytes').textContent = v ? `${countBytes(v).toLocaleString()}바이트` : '';
   }
   function bindPromptTabs() {
     const save = () => {
       const tabs = cfg.transform_tabs.map((t) => Object.assign({}, t));
-      tabs[cfg.active_tab] = { name: $('tabName').value, prompt: $('tabPrompt').value };
+      tabs[cfg.active_tab] = { name: $('tabName').value, prompt: $('tabPrompt').value, example: $('tabExample').value };
       updateCfg({ transform_tabs: tabs });
       const btn = $('promptTabs').children[cfg.active_tab];
       if (btn) btn.textContent = $('tabName').value || `프롬프트 ${cfg.active_tab + 1}`;
+      updateExampleBytes();
     };
     $('tabName').addEventListener('input', save);
     $('tabPrompt').addEventListener('input', save);
+    $('tabExample').addEventListener('input', save);
     $('targetBytes').addEventListener('input', () => {
       updateCfg({ target_bytes: parseInt($('targetBytes').value, 10) || 0 });
       document.querySelectorAll('.student').forEach((card) => updateBytes(card));
     });
+    window.addEventListener('resize', debounce(sizePromptAreas, 100));
+  }
+
+  // 1단계를 접었을 때 지침 칸이 화면 아래 끝까지 차도록 높이를 맞춘다
+  function sizePromptAreas() {
+    const ta = $('tabPrompt');
+    if ($('stage2').hidden || !ta.offsetParent) return;
+    const body = $('stage1Body');
+    const extra = body.hidden ? 0 : body.offsetHeight;
+    const top = ta.getBoundingClientRect().top + window.scrollY - extra;
+    const below = 46; // 칸 아래 안내 문구와 여백
+    const h = Math.max(280, window.innerHeight - top - below);
+    ta.style.height = h + 'px';
+    $('tabExample').style.height = h + 'px';
   }
 
   // ---------- 1단계 ----------
@@ -223,6 +320,12 @@
     } else {
       w.hidden = true;
     }
+  }
+  function setStage1Collapsed(collapsed) {
+    $('stage1Body').hidden = collapsed;
+    $('stage1Toggle').textContent = collapsed ? '펼치기' : '접기';
+    $('stage1').classList.toggle('collapsed', collapsed);
+    requestAnimationFrame(sizePromptAreas);
   }
   function bindStage1() {
     $('pickPdfBtn').addEventListener('click', async () => {
@@ -238,14 +341,16 @@
       updateCfg({ pages_per_student: Math.max(1, parseInt($('perStudent').value, 10) || 1) });
       checkPages();
     });
+    $('stage1Toggle').addEventListener('click', () => setStage1Collapsed(!$('stage1Body').hidden));
     $('stage1Btn').addEventListener('click', async () => {
       if (!pdf) { alertBox('먼저 PDF를 선택해 주세요.'); return; }
       if (students.length && !(await confirmBox('새로 시작하면 지금 2단계 목록과 변환 결과가 모두 사라집니다. 계속할까요?'))) return;
       const per = Math.max(1, parseInt($('perStudent').value, 10) || 1);
       const r = await api.start_stage1(pdf.path, per);
       if (!r.ok) { setStatus('error', r.error); return; }
+      setStatus('', '');
       setBusy(true);
-      setStatus('progress', 'OCR 준비 중…');
+      openProgress('stage1');
     });
   }
 
@@ -273,38 +378,56 @@
   function bytesLabel(text) {
     const n = countBytes(text);
     const target = cfg.target_bytes || 0;
-    if (!target) return { text: `${n.toLocaleString()} 바이트`, off: false };
+    if (!target) return { text: `${n.toLocaleString()}바이트`, off: false };
     const off = Math.abs(n - target) > target * 0.1;
-    return { text: `${n.toLocaleString()} / ${target.toLocaleString()} 바이트`, off };
+    return { text: `${n.toLocaleString()} / ${target.toLocaleString()}바이트`, off };
   }
   function updateBytes(card) {
     card.querySelectorAll('[data-bytes-for]').forEach((b) => {
       const ta = card.querySelector(`textarea[data-role="${b.dataset.bytesFor}"]`);
       if (!ta) return;
       const isOriginal = b.dataset.bytesFor === 'original';
-      const lb = isOriginal ? { text: `${countBytes(ta.value).toLocaleString()} 바이트`, off: false } : bytesLabel(ta.value);
+      const lb = isOriginal ? { text: `${countBytes(ta.value).toLocaleString()}바이트`, off: false } : bytesLabel(ta.value);
       b.textContent = lb.text;
       b.classList.toggle('off', lb.off);
     });
   }
 
+  // 1안, 2안 중 긴 내용이 다 보이도록 높이를 맞춘다. 원본은 같은 높이에서 스크롤한다.
+  function fitCard(card) {
+    const results = card.querySelectorAll('textarea[data-role="r0"], textarea[data-role="r1"]');
+    const original = card.querySelector('textarea[data-role="original"]');
+    let h = 200;
+    results.forEach((ta) => { ta.style.height = 'auto'; h = Math.max(h, ta.scrollHeight + 4); });
+    results.forEach((ta) => { ta.style.height = h + 'px'; });
+    card.querySelectorAll('.col .empty').forEach((e) => { e.style.height = h + 'px'; });
+    if (original) original.style.height = h + 'px';
+  }
+
   function renderCard(s) {
+    const no = s.index + 1;
     const sid = el('input', { type: 'text', class: 'sid' + (s.student_id ? '' : ' missing'), placeholder: '학번', value: s.student_id });
     sid.addEventListener('input', () => { s.student_id = sid.value.trim(); sid.classList.toggle('missing', !s.student_id); });
     const name = el('input', { type: 'text', class: 'sname' + (s.name ? '' : ' missing'), placeholder: '이름', value: s.name });
     name.addEventListener('input', () => { s.name = name.value.trim(); name.classList.toggle('missing', !s.name); });
-    const check = el('input', { type: 'checkbox' });
+    const check = el('input', { type: 'checkbox', class: 'check' });
     check.checked = s.checked;
     check.addEventListener('change', () => { s.checked = check.checked; });
 
     const head = el('div', { class: 'student-head' }, [
       check,
-      el('span', { class: 'seq', text: `${s.index + 1}번째 (p.${s.pages})` }),
-      sid,
-      name,
+      el('span', { class: 'seq', text: `${no}번째 학생` }),
+      el('span', { class: 'pages', text: `p.${s.pages}` }),
+      el('label', { class: 'field-inline' }, ['학번', sid]),
+      el('label', { class: 'field-inline' }, ['이름', name]),
+      s.picked !== null ? el('span', { class: 'picked-badge', text: `${s.picked + 1}안 선택됨` }) : null,
       s.error ? el('span', { class: 'err', text: '정제 실패: ' + s.error }) : null,
       s.rerr ? el('span', { class: 'err', text: '변환 실패: ' + s.rerr }) : null,
-      el('button', { type: 'button', class: 'rerun', text: s.busy ? '변환 중…' : '이 학생 다시 실행', disabled: busy, onclick: () => runTransform([s.index]) }),
+      el('button', {
+        type: 'button', class: 'rerun',
+        text: s.busy ? '변환 중…' : `${no}번째 학생 다시 변환`,
+        disabled: busy, onclick: () => runTransform([s.index]),
+      }),
     ]);
 
     const original = el('textarea', { 'data-role': 'original' });
@@ -319,29 +442,26 @@
       const cls = 'col' + (s.picked === i ? ' picked' : '');
       if (!r) {
         return el('div', { class: cls }, [
-          el('div', { class: 'col-title', text: `${i + 1}열` }),
+          el('div', { class: 'col-title', text: `${i + 1}안` }),
           el('div', { class: 'empty', text: s.busy && (i === 0 || s.results[0]) ? '변환 중…' : '아직 결과가 없습니다' }),
         ]);
       }
       const ta = el('textarea', { 'data-role': 'r' + i });
       ta.value = r.text;
-      ta.addEventListener('input', () => { r.text = ta.value; updateBytes(card); });
+      ta.addEventListener('input', () => { r.text = ta.value; updateBytes(card); fitCard(card); });
       return el('div', { class: cls }, [
-        el('div', { class: 'col-title' }, [
-          `${i + 1}열`,
-          el('span', { class: 'bytes', 'data-bytes-for': 'r' + i }),
-        ]),
+        el('div', { class: 'col-title' }, [`${i + 1}안`, el('span', { class: 'bytes', 'data-bytes-for': 'r' + i })]),
         ta,
         el('button', {
           type: 'button',
           class: 'pick-btn',
-          text: s.picked === i ? `${i + 1}열 선택됨` : `${i + 1}열 선택`,
+          text: s.picked === i ? `${i + 1}안 선택됨` : `${i + 1}안 선택`,
           onclick: () => { s.picked = s.picked === i ? null : i; rerenderCard(s); },
         }),
       ]);
     };
 
-    const card = el('div', { class: 'student' + (s.busy ? ' busy' : ''), 'data-index': s.index }, [
+    const card = el('div', { class: 'student' + (s.busy ? ' busy' : '') + (s.picked !== null ? ' has-pick' : ''), 'data-index': s.index }, [
       head,
       el('div', { class: 'student-body' }, [origCol, resultCol(0), resultCol(1)]),
     ]);
@@ -352,13 +472,17 @@
 
   function rerenderCard(s) {
     const old = document.querySelector(`.student[data-index="${s.index}"]`);
-    if (old) old.replaceWith(renderCard(s));
+    if (!old) return;
+    const card = renderCard(s);
+    old.replaceWith(card);
+    fitCard(card);
   }
   function renderStudents() {
     const box = $('studentList');
     box.innerHTML = '';
     sortedStudents().forEach((s) => box.appendChild(renderCard(s)));
     $('stage2').hidden = students.length === 0;
+    box.querySelectorAll('.student').forEach(fitCard);
   }
 
   // ---------- 2단계: 변환 ----------
@@ -369,29 +493,31 @@
     const empty = targets.filter((s) => !s.original.trim());
     if (empty.length === targets.length) { alertBox('원본이 비어 있어 변환할 수 없습니다.'); return; }
     const willDrop = targets.filter((s) => s.original.trim() && s.results[0] && s.results[1]).length;
-    if (willDrop && !(await confirmBox(`${willDrop}명의 1열 결과가 삭제됩니다.\n(2열 결과가 1열로 옮겨지고, 새 결과가 2열에 들어갑니다.)\n계속할까요?`))) return;
+    if (willDrop && !(await confirmBox(`${willDrop}명의 1안 결과가 삭제됩니다.\n(2안 결과가 1안으로 옮겨지고, 새 결과가 2안에 들어갑니다.)\n계속할까요?`))) return;
 
     const tab = (cfg.transform_tabs || [])[cfg.active_tab] || {};
     const items = targets.filter((s) => s.original.trim()).map((s) => ({ index: s.index, original: s.original }));
-    const r = await api.start_transform(items, tab.prompt || '', cfg.target_bytes || 0);
+    const r = await api.start_transform(items, tab.prompt || '', cfg.target_bytes || 0, tab.example || '');
     if (!r.ok) { alertBox(r.error); return; }
     setBusy(true);
     items.forEach((it) => { const s = byIndex(it.index); s.busy = true; s.rerr = ''; rerenderCard(s); });
-    setStatus('progress', `변환 중… 0/${items.length}명`);
+    openProgress('transform');
   }
 
   function applyResult(ev) {
     const s = byIndex(ev.index);
     if (!s) return;
     s.busy = false;
-    if (ev.error) {
+    if (ev.skipped) {
+      // 중지되어 보내지 않은 학생은 그대로 둔다
+    } else if (ev.error) {
       s.rerr = ev.error;
     } else if (!s.results[0]) {
       s.results[0] = { text: ev.text };
     } else if (!s.results[1]) {
       s.results[1] = { text: ev.text };
     } else {
-      // 2열 → 1열, 기존 1열 삭제, 새 결과 → 2열. 선택은 내용을 따라간다.
+      // 2안 → 1안, 기존 1안 삭제, 새 결과 → 2안. 선택은 내용을 따라간다.
       s.results[0] = s.results[1];
       s.results[1] = { text: ev.text };
       s.picked = s.picked === 1 ? 0 : null;
@@ -422,7 +548,7 @@
     const list = sortedStudents();
     if (includeTransform) {
       const unpicked = list.filter((s) => s.picked === null || !s.results[s.picked]).length;
-      if (unpicked && !(await confirmBox(`변환 결과를 선택하지 않은 학생이 ${unpicked}명 있습니다.\n이 학생들은 변환(D열)이 빈칸으로 저장됩니다. 계속할까요?`))) return;
+      if (unpicked && !(await confirmBox(`변환 결과(1안 또는 2안)를 선택하지 않은 학생이 ${unpicked}명 있습니다.\n이 학생들은 변환(D열)이 빈칸으로 저장됩니다. 계속할까요?`))) return;
     }
     const rows = list.map((s) => ({
       student_id: s.student_id,
@@ -439,50 +565,65 @@
   // ---------- Python → 화면 이벤트 ----------
   window.onAppEvent = function (ev) {
     switch (ev.type) {
-      case 'progress':
-        setStatus('progress', ev.message);
+      case 'step':
+        updateStep(ev);
         break;
       case 'error':
+        closeProgress();
         setStatus('error', '오류: ' + ev.message);
         students.forEach((s) => { if (s.busy) { s.busy = false; rerenderCard(s); } });
+        alertBox('오류: ' + ev.message);
+        break;
+      case 'stopped':
+        closeProgress();
+        setStatus('error', '중지했습니다.');
         break;
       case 'stage1_done': {
+        closeProgress();
         students = ev.students.map((s) => Object.assign(s, { results: [null, null], picked: null, checked: true, busy: false, rerr: '' }));
         sortMode = 'scan';
         document.querySelectorAll('.sort-btn').forEach((x) => x.classList.toggle('active', x.dataset.sort === 'scan'));
         renderStudents();
         const failed = students.filter((s) => s.error).length;
         const missing = students.filter((s) => !s.student_id || !s.name).length;
-        let msg = `1단계 완료: ${students.length}명`;
-        if (failed) msg += ` · 정제 실패 ${failed}명(OCR 원문을 그대로 넣었습니다)`;
-        if (missing) msg += ` · 학번/이름 확인 필요 ${missing}명(노란 칸)`;
-        setStatus('info', msg);
+        let msg = `완료 - ${pdf ? pdf.name : ''}, ${students.length}명`;
+        if (failed) msg += ` - 정제 실패 ${failed}명(OCR 원문을 그대로 넣었습니다)`;
+        if (missing) msg += ` - 학번/이름 확인 필요 ${missing}명(노란 칸)`;
+        if (ev.stopped) msg = '중지됨 - ' + msg;
+        $('stage1Summary').textContent = msg;
+        $('stage1Toggle').hidden = false;
+        setStatus(failed || ev.stopped ? 'error' : 'info', msg);
         setCredits(ev.cost, ev.balance);
-        $('stage2').scrollIntoView({ behavior: 'smooth' });
+        setStage1Collapsed(!failed && !ev.stopped);
+        window.scrollTo(0, 0);
         break;
       }
       case 'transform_result':
         applyResult(ev);
         break;
       case 'transform_done':
-        setStatus('info', '변환 완료');
+        closeProgress();
         setCredits(ev.cost, ev.balance);
+        if (ev.stopped) alertBox('변환을 중지했습니다. 이미 받은 결과는 반영했습니다.');
         break;
       case 'idle':
         setBusy(false);
-        document.querySelectorAll('.rerun').forEach((b) => { b.disabled = false; });
         break;
     }
   };
 
-  // ---------- 메뉴·안내 ----------
+  // ---------- 메뉴, 안내 ----------
   function bindMenu() {
     document.querySelectorAll('.menu-btn[data-panel]').forEach((b) => {
-      b.addEventListener('click', () => {
-        document.querySelectorAll('.menu-btn[data-panel]').forEach((x) => x.classList.toggle('active', x === b));
-        document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.dataset.panelContent === b.dataset.panel));
-        window.scrollTo(0, 0);
-      });
+      b.addEventListener('click', () => showPanel(b.dataset.panel));
+    });
+    $('brandBox').addEventListener('click', () => {
+      modal('자유롭게 배포 가능하지만 반드시 <b class="danger-text">키 초기화</b>하고 배포하세요.<br><span class="muted">설정 &gt; 연결 정보 맨 아래에 [키 초기화] 버튼이 있습니다.</span>', false, true);
+    });
+    $('stopBtn').addEventListener('click', async () => {
+      $('stopBtn').disabled = true;
+      $('stopBtn').textContent = '중지 중…';
+      await api.stop();
     });
     // 바깥 링크는 기본 브라우저로 연다
     document.addEventListener('click', (e) => {
@@ -511,7 +652,6 @@
     api = window.pywebview.api;
     const info = await api.app_info();
     $('appVer').textContent = 'v' + info.version;
-    $('footVer').textContent = 'v' + info.version;
     $('maker').textContent = info.maker;
     cfg = await api.load_config();
     fillSettings();
@@ -522,9 +662,9 @@
     bindStage2();
     loadGuide();
     refreshBalance();
-    if (!cfg.clova_url || !cfg.clova_secret || !cfg.openrouter_key) {
-      document.querySelector('.menu-btn[data-panel="guide"]').click();
-    }
+    const noKeys = !cfg.clova_url || !cfg.clova_secret || !cfg.openrouter_key;
+    showPanel(noKeys ? 'settings' : 'main');
+    if (noKeys) $('guideBox').open = true;
   }
 
   window.addEventListener('pywebviewready', init);

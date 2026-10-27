@@ -28,11 +28,12 @@ DEFAULT_TRANSFORM_TABS = [
     {
         "name": "요약",
         "prompt": "다음 학생 글의 핵심 내용을 문단 하나로 요약하라. 학생의 관점과 주장을 유지한다.",
+        "example": "",
     },
-    {"name": "프롬프트 2", "prompt": ""},
-    {"name": "프롬프트 3", "prompt": ""},
-    {"name": "프롬프트 4", "prompt": ""},
-    {"name": "프롬프트 5", "prompt": ""},
+    {"name": "프롬프트 2", "prompt": "", "example": ""},
+    {"name": "프롬프트 3", "prompt": "", "example": ""},
+    {"name": "프롬프트 4", "prompt": "", "example": ""},
+    {"name": "프롬프트 5", "prompt": "", "example": ""},
 ]
 
 
@@ -46,6 +47,17 @@ def length_rule(target_bytes: int) -> str:
         f"- 목표 분량은 약 {target_bytes}바이트다. 한글 한 글자는 3바이트, "
         f"영어·숫자·기호·공백은 1바이트로 센다.\n"
         f"- 한글 위주라면 공백 포함 약 {approx_chars}자 안팎이다."
+    )
+
+
+def example_rule(example: str) -> str:
+    example = (example or "").strip()
+    if not example:
+        return ""
+    return (
+        "\n\n[예시]\n"
+        "- 아래 예시의 문체, 형식, 분량을 참고한다. 예시의 내용은 베끼지 않고, 주어진 학생 글의 내용만 쓴다.\n"
+        f"<예시>\n{example}\n</예시>"
     )
 
 

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import webview
 
 from . import APP_NAME, MAKER, VERSION, config, excel, ocr, openrouter
-from .prompts import REFINE_FORMAT, TRANSFORM_FORMAT, length_rule
+from .prompts import REFINE_FORMAT, TRANSFORM_FORMAT, example_rule, length_rule
 from .textutil import count_bytes
 
 LLM_WORKERS = 4
@@ -53,6 +53,7 @@ class Api:
     def __init__(self):
         self._window = None
         self._busy = threading.Lock()
+        self._stop = threading.Event()
 
     def attach(self, window):
         self._window = window
@@ -62,13 +63,19 @@ class Api:
         if self._window:
             self._window.evaluate_js(f"window.onAppEvent({json.dumps(payload, ensure_ascii=False)})")
 
+    def _step(self, key, state, **extra):
+        self._emit({"type": "step", "key": key, "state": state, **extra})
+
     def _run_bg(self, target, *args):
         if not self._busy.acquire(blocking=False):
             return {"ok": False, "error": "다른 작업이 진행 중입니다."}
+        self._stop.clear()
 
         def wrapper():
             try:
                 target(*args)
+            except ocr.Stopped:
+                self._emit({"type": "stopped"})
             except Exception as e:  # 화면에 알리고 끝낸다
                 self._emit({"type": "error", "message": str(e)})
             finally:
@@ -76,6 +83,10 @@ class Api:
                 self._emit({"type": "idle"})
 
         threading.Thread(target=wrapper, daemon=True).start()
+        return {"ok": True}
+
+    def stop(self):
+        self._stop.set()
         return {"ok": True}
 
     def app_info(self):
@@ -156,17 +167,23 @@ class Api:
 
     def _stage1(self, path, per, cfg):
         def ocr_progress(n, total_chunks, total_pages):
-            self._emit(
-                {
-                    "type": "progress",
-                    "message": f"OCR 중… {n + 1}/{total_chunks}구간 (전체 {total_pages}페이지)",
-                }
-            )
+            if n == 0:
+                self._step("split", "done", text=f"{total_pages}페이지 → {total_chunks}구간")
+            self._step("ocr", "active", done=n, total=total_chunks)
 
+        self._step("split", "active")
         pages = ocr.ocr_pdf(
-            path, cfg["clova_url"].strip(), cfg["clova_secret"].strip(), cfg["ocr_lang"], ocr_progress
+            path,
+            cfg["clova_url"].strip(),
+            cfg["clova_secret"].strip(),
+            cfg["ocr_lang"],
+            ocr_progress,
+            self._stop.is_set,
         )
+        chunks = -(-len(pages) // ocr.MAX_PAGES_PER_CALL)
+        self._step("ocr", "done", done=chunks, total=chunks)
         groups = [pages[i : i + per] for i in range(0, len(pages), per)]
+
         def page_range(i, g):
             first = i * per + 1
             return str(first) if len(g) == 1 else f"{first}-{first + len(g) - 1}"
@@ -184,8 +201,10 @@ class Api:
         lock = threading.Lock()
 
         def refine(st):
-            out = {"index": st["index"], "pages": st["pages"], "student_id": "", "name": "", "original": "", "error": ""}
-            if not st["raw"]:
+            out = {"index": st["index"], "pages": st["pages"], "student_id": "", "name": "", "original": st["raw"], "error": ""}
+            if self._stop.is_set():
+                out["error"] = "중지되어 정제하지 않았습니다(OCR 원문)."
+            elif not st["raw"]:
                 out["error"] = "인식된 글자가 없습니다."
             else:
                 try:
@@ -198,26 +217,27 @@ class Api:
                         cost[0] += c
                 except openrouter.LlmError as e:
                     out["error"] = str(e)
-                    out["original"] = st["raw"]
             with lock:
                 done[0] += 1
-                self._emit({"type": "progress", "message": f"정제 중… {done[0]}/{len(students)}명"})
+                self._step("refine", "active", done=done[0], total=len(students))
             return out
 
-        self._emit({"type": "progress", "message": f"정제 중… 0/{len(students)}명"})
+        self._step("refine", "active", done=0, total=len(students))
         with ThreadPoolExecutor(LLM_WORKERS) as ex:
             results = list(ex.map(refine, students))
+        self._step("refine", "done", done=len(students), total=len(students))
         self._emit(
             {
                 "type": "stage1_done",
                 "students": results,
+                "stopped": self._stop.is_set(),
                 "cost": cost[0],
                 "balance": openrouter.balance(key),
             }
         )
 
     # ---------- 2단계 ----------
-    def start_transform(self, items, prompt, target_bytes):
+    def start_transform(self, items, prompt, target_bytes, example=""):
         """items: [{index, original}]"""
         cfg = config.load()
         if not cfg["openrouter_key"].strip():
@@ -228,16 +248,21 @@ class Api:
             return {"ok": False, "error": "변환 지침(프롬프트)을 입력해 주세요."}
         if not items:
             return {"ok": False, "error": "변환할 학생을 체크해 주세요."}
-        return self._run_bg(self._transform, items, prompt, int(target_bytes or 0), cfg)
+        return self._run_bg(self._transform, items, prompt, int(target_bytes or 0), example or "", cfg)
 
-    def _transform(self, items, prompt, target_bytes, cfg):
-        system = prompt.strip() + length_rule(target_bytes) + TRANSFORM_FORMAT
+    def _transform(self, items, prompt, target_bytes, example, cfg):
+        system = prompt.strip() + example_rule(example) + length_rule(target_bytes) + TRANSFORM_FORMAT
         key, model = cfg["openrouter_key"].strip(), cfg["transform_model"]
         done = [0]
         cost = [0.0]
         lock = threading.Lock()
 
         def run(item):
+            if self._stop.is_set():
+                with lock:
+                    done[0] += 1
+                    self._emit({"type": "transform_result", "index": item["index"], "skipped": True})
+                return
             try:
                 if not (item.get("original") or "").strip():
                     raise openrouter.LlmError("원본이 비어 있습니다.")
@@ -250,12 +275,20 @@ class Api:
             with lock:
                 done[0] += 1
                 self._emit(payload)
-                self._emit({"type": "progress", "message": f"변환 중… {done[0]}/{len(items)}명"})
+                self._step("transform", "active", done=done[0], total=len(items))
 
-        self._emit({"type": "progress", "message": f"변환 중… 0/{len(items)}명"})
+        self._step("transform", "active", done=0, total=len(items))
         with ThreadPoolExecutor(LLM_WORKERS) as ex:
             list(ex.map(run, items))
-        self._emit({"type": "transform_done", "cost": cost[0], "balance": openrouter.balance(key)})
+        self._step("transform", "done", done=len(items), total=len(items))
+        self._emit(
+            {
+                "type": "transform_done",
+                "stopped": self._stop.is_set(),
+                "cost": cost[0],
+                "balance": openrouter.balance(key),
+            }
+        )
 
     # ---------- 저장 ----------
     def save_xlsx(self, rows, include_transform, default_name):

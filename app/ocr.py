@@ -16,6 +16,10 @@ class OcrError(Exception):
     pass
 
 
+class Stopped(Exception):
+    pass
+
+
 def split_pdf(path: str, max_pages: int = MAX_PAGES_PER_CALL):
     """(전체 페이지 수, [(시작 페이지 index, PDF bytes)])"""
     reader = PdfReader(path)
@@ -83,7 +87,7 @@ def image_to_text(img: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def ocr_pdf(path: str, url: str, secret: str, lang: str, progress=None) -> list[str]:
+def ocr_pdf(path: str, url: str, secret: str, lang: str, progress=None, should_stop=None) -> list[str]:
     """페이지 순서대로 텍스트 목록을 돌려준다."""
     import os
 
@@ -95,6 +99,8 @@ def ocr_pdf(path: str, url: str, secret: str, lang: str, progress=None) -> list[
     name = os.path.basename(path)
     pages: dict[int, str] = {}
     for n, (start, data) in enumerate(chunks):
+        if should_stop and should_stop():
+            raise Stopped()
         if progress:
             progress(n, len(chunks), total)
         body = call_once(url, secret, data, name, lang)
