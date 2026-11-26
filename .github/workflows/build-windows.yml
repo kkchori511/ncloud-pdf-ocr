@@ -88,6 +88,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Download executable
         uses: actions/download-artifact@v8
         with:
@@ -103,7 +106,13 @@ jobs:
         run: |
           gh release view "$env:RELEASE_TAG" --repo "$env:GH_REPO"
           if ($LASTEXITCODE -ne 0) {
-            gh release create "$env:RELEASE_TAG" --repo "$env:GH_REPO" --title "악필교정기 $env:RELEASE_TAG" --generate-notes --verify-tag
+            # 바뀐 내용은 docs/releases/<태그>.md(한국어, 내려받기 페이지와 앱의 [바뀐 내용]에 그대로 보임). 없으면 자동 생성.
+            $notes = "docs/releases/$env:RELEASE_TAG.md"
+            if (Test-Path $notes) {
+              gh release create "$env:RELEASE_TAG" --repo "$env:GH_REPO" --title "악필교정기 $env:RELEASE_TAG" --notes-file $notes --verify-tag
+            } else {
+              gh release create "$env:RELEASE_TAG" --repo "$env:GH_REPO" --title "악필교정기 $env:RELEASE_TAG" --generate-notes --verify-tag
+            }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           # Release 파일 이름은 영문으로 둔다(한글이면 GitHub가 default.exe로 바꾼다). 갤러리가 latest/download/Akpil.exe로 연결한다.

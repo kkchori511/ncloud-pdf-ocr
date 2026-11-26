@@ -41,13 +41,14 @@ def test():
     assert updater.is_newer("v9.0.0") and not updater.is_newer(f"v{VERSION}") and not updater.is_newer("v0.9")
     assert updater.MIRROR.format(version="1.2.3") == "https://kkchori511.github.io/ncloud-pdf-ocr/Akpil-1.2.3.exe"
 
-    rel = {"tag_name": "v9.0.0", "body": "노트", "assets": [
+    assert updater.clean_notes("## 새것\r\n- **가**: 나\r\n\r\n**Full Changelog**: https://x") == "[새것]\n- 가: 나"
+    rel = {"tag_name": "v9.0.0", "body": "노트\n\n**Full Changelog**: https://x", "assets": [
         {"name": "other.exe", "browser_download_url": "x"},
         {"name": "Akpil.exe", "size": len(BODY), "digest": "sha256:" + SHA,
          "browser_download_url": "https://github.com/kkchori511/ncloud-pdf-ocr/releases/download/v9.0.0/Akpil.exe"}]}
     updater.requests.get = lambda *a, **k: Res(200, rel)
     info = updater.check()
-    assert info["available"] and info["version"] == "9.0.0" and info["sha256"] == SHA, info
+    assert info["available"] and info["version"] == "9.0.0" and info["sha256"] == SHA and info["notes"] == "노트", info
     assert info["url"].endswith("/Akpil.exe") and info["can_apply"] is False  # 개발 실행(mac)에서는 교체하지 않음
 
     updater.requests.get = lambda *a, **k: Res(200, {**rel, "tag_name": f"v{VERSION}"})

@@ -29,6 +29,19 @@ MIRROR = f"https://{GITHUB_REPO.split('/')[0]}.github.io/{GITHUB_REPO.split('/')
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
 
+def clean_notes(body: str) -> str:
+    """릴리스 노트를 앱 알림 창(일반 글)에 맞게: 'Full Changelog' 줄을 빼고, 제목(##)은 [제목], 굵게(**)는 기호만 지운다."""
+    out = []
+    for l in (body or "").replace("\r", "").split("\n"):
+        if l.startswith("**Full Changelog"):
+            continue
+        m = re.match(r"^#{1,6}\s+(.*)$", l)
+        if m:
+            l = f"[{m.group(1).strip()}]"
+        out.append(l.replace("**", ""))
+    return "\n".join(out).strip()
+
+
 class UpdateError(Exception):
     def __init__(self, msg, code=None):
         super().__init__(msg)
@@ -74,7 +87,7 @@ def check() -> dict:
         "ok": True,
         "available": True,
         "version": tag.lstrip("v"),
-        "notes": (data.get("body") or "").strip()[:2000],
+        "notes": clean_notes(data.get("body") or "")[:2000],
         "url": asset.get("browser_download_url"),
         "size": asset.get("size"),
         "sha256": sha,

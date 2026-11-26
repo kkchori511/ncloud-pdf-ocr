@@ -24,7 +24,12 @@
   .sub a { color: var(--accent-hover); }
   h2 { font-size: 19px; margin: 0 0 12px; }
   li { margin-bottom: 6px; }
-  .notes { white-space: pre-wrap; font-size: 14px; color: var(--text-2); background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0; }
+  .notes h3 { font-size: 16px; margin: 14px 0 6px; color: var(--text); }
+  .notes h3:first-child { margin-top: 0; }
+  .notes ul { margin: 0; padding-left: 20px; }
+  .notes p { margin: 6px 0; }
+  .notes a { color: var(--accent-hover); }
+  .notes { overflow-wrap: anywhere; font-size: 14px; font-family: inherit; line-height: 1.7; color: var(--text-2); background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0; }
   code { background: #fff; border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; font-size: .9em; }
 </style>
 </head>
@@ -60,16 +65,35 @@
 
   <section class="card" id="notesCard" hidden>
     <h2>바뀐 내용</h2>
-    <pre class="notes" id="notes"></pre>
+    <div class="notes" id="notes"></div>
   </section>
 </main>
 <script>
+  // 릴리스 노트의 간단한 마크다운(제목, 목록, 굵게, 주소)만 그린다. 글은 먼저 이스케이프한다.
+  function renderNotes(md) {
+    const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const inline = (t) => esc(t)
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/(https:\/\/[^\s)<]+)/g, '<a href="$1">$1</a>');
+    let html = '', list = false;
+    for (const line of md.split('\n')) {
+      const h = line.match(/^#{1,6}\s+(.*)$/);
+      const li = line.match(/^\s*[-*]\s+(.*)$/);
+      if (!li && list) { html += '</ul>'; list = false; }
+      if (h) html += `<h3>${inline(h[1])}</h3>`;
+      else if (li) { if (!list) { html += '<ul>'; list = true; } html += `<li>${inline(li[1])}</li>`; }
+      else if (line.trim()) html += `<p>${inline(line)}</p>`;
+    }
+    return html + (list ? '</ul>' : '');
+  }
   // 최신 릴리스 노트(GitHub API). 못 읽으면 칸을 숨긴 채 둔다.
   fetch('https://api.github.com/repos/kkchori511/ncloud-pdf-ocr/releases/latest')
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
       if (!d || !d.body) return;
-      document.getElementById('notes').textContent = d.body.replace(/\r/g, '').trim();
+      const body = d.body.replace(/\r/g, '').split('\n').filter((l) => !/^\*\*Full Changelog/.test(l)).join('\n').trim();
+      if (!body) return;
+      document.getElementById('notes').innerHTML = renderNotes(body);
       document.getElementById('notesCard').hidden = false;
     })
     .catch(() => {});
