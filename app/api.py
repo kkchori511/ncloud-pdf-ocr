@@ -65,6 +65,61 @@ class Api:
     def attach(self, window):
         self._window = window
 
+    # ---------- 실행 시작 화면 ----------
+    INTRO_MIN = 1.5  # 시작 화면을 적어도 이만큼 보인다(준비가 늦으면 그만큼 더)
+
+    def attach_splash(self, splash):
+        """시작 화면 창을 기억한다. 화면이 끝내 준비 신호를 못 보내도 본 창이 뜨게 20초 뒤 대비책."""
+        import time
+
+        self._splash, self._splash_t0, self._shown = splash, None, splash is None
+        self._splash_lock = threading.Lock()
+        self._splash_seen = threading.Event()  # 시작 화면이 실제로 그려진 때부터 최소 시간을 센다
+
+        def loaded():
+            if self._splash_t0 is None:
+                self._splash_t0 = time.time()
+            self._splash_seen.set()
+
+        if splash is not None:
+            try:
+                splash.events.loaded += loaded
+            except Exception:
+                loaded()
+            t = threading.Timer(20, self._show_main)
+            t.daemon = True
+            t.start()
+
+    def _show_main(self):
+        import time
+
+        lock = getattr(self, "_splash_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if self._shown:
+                return
+            self._shown = True
+        self._splash_seen.wait(4)  # 시작 화면이 아직 안 그려졌으면 잠깐 기다린다(끝내 안 그려져도 본 창은 뜸)
+        wait = self.INTRO_MIN - (time.time() - (self._splash_t0 or time.time()))
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            if self._window:
+                self._window.show()
+        finally:
+            try:
+                if self._splash is not None:
+                    self._splash.destroy()
+            except Exception:
+                pass
+            self._splash = None
+
+    def app_ready(self):
+        """화면 준비 끝: 시작 화면을 닫고 본 창을 보인다. 여러 번 불러도 한 번만."""
+        threading.Thread(target=self._show_main, daemon=True).start()
+        return {"ok": True}
+
     # ---------- 공통 ----------
     def _emit(self, payload: dict):
         if self._window:

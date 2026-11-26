@@ -1168,7 +1168,12 @@
     renderGroups();
   }
 
+  // 시작 화면을 닫고 본 창을 보인다(여러 번 불러도 한 번만)
+  const appReady = () => { try { if (api && api.app_ready) api.app_ready(); } catch (e) { /* 시작 화면이 없으면 그만 */ } };
   async function init() {
+    try { await initInner(); } finally { appReady(); }
+  }
+  async function initInner() {
     api = window.pywebview.api;
     const info = await api.app_info();
     appInfo = info;

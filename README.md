@@ -1,7 +1,7 @@
 # 악필교정기
 
 학생 과제 스캔 PDF를 CLOVA OCR로 읽고, OpenRouter AI로 정제·변환하여 Excel(xlsx)로 저장하는 Windows 프로그램입니다.
-Made by 김한량 디지털 공방 · 버전 1.2.0
+Made by 김한량 디지털 공방 · 버전 1.2.1
 
 **내려받기**: https://kkchori511.github.io/ncloud-pdf-ocr/ (앱을 켜면 새 버전을 확인하고 [지금 업데이트]로 바꿉니다)
 

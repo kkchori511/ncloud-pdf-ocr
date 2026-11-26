@@ -5,6 +5,29 @@ import webview
 from . import APP_NAME, VERSION
 
 
+def intro_html():
+    """실행 시작 화면(작은 창): 큰 앱 아이콘, 페이퍼로지 '악필교정기', 버전. 파일이 없으면 None(시작 화면 없이 본 창).
+    html 문자열로 띄워 파일 경로를 쓸 수 없으므로 글꼴(필요한 글자만 남긴 페이퍼로지)과 아이콘을 data URL로 넣는다."""
+    import base64
+
+    from .paths import web_dir
+
+    try:
+        html = (web_dir() / "intro.html").read_text(encoding="utf-8")
+        icon = base64.b64encode((web_dir() / "splash_icon.png").read_bytes()).decode()
+    except OSError:
+        return None
+    fonts = []
+    for weight, name in ((800, "intro-Paperlogy-8ExtraBold.woff2"), (600, "intro-Paperlogy-6SemiBold.woff2")):
+        try:
+            b64 = base64.b64encode((web_dir() / "fonts" / name).read_bytes()).decode()
+        except OSError:
+            continue
+        fonts.append(f'@font-face{{font-family:"PaperlogyIntro";font-weight:{weight};src:url(data:font/woff2;base64,{b64}) format("woff2")}}')
+    return (html.replace("v0.0.0", f"v{VERSION}").replace("/*INTRO_FONTS*/", "".join(fonts))
+            .replace("/*INTRO_ICON*/", "data:image/png;base64," + icon))
+
+
 def selftest(out_path):
     """빌드 확인용(CI): 묶인 라이브러리가 exe 안에서 동작하는지 본다. 창은 띄우지 않는다."""
     import io
@@ -31,13 +54,15 @@ def selftest(out_path):
         from . import web_ok
 
         lines.append("web OK" if web_ok() else "web MISSING")
+        intro = intro_html()
+        lines.append("intro OK" if intro and "PaperlogyIntro" in intro and "data:image/png" in intro and VERSION in intro else "intro MISSING")
         lines.append(f"version {VERSION}")
         if "--after-swap" in sys.argv:
             from . import updater
 
             removed = updater.cleanup_leftovers(60)
             lines.append("leftovers cleaned: " + ",".join(removed))
-        code = 0 if "web OK" in lines else 1
+        code = 0 if "web OK" in lines and "intro OK" in lines else 1
     except Exception:
         lines.append(traceback.format_exc())
         code = 1
@@ -71,6 +96,7 @@ def main():
     from .api import Api
 
     api = Api()
+    intro = intro_html()
     window = webview.create_window(
         f"{APP_NAME} {VERSION}",
         url="app/web/index.html",  # pywebview가 앱 루트(_MEIPASS) 기준으로 내장 서버에서 제공
@@ -78,8 +104,19 @@ def main():
         width=1280,
         height=900,
         min_size=(960, 640),
+        hidden=bool(intro),  # 시작 화면을 보이는 동안 숨겨 두고, 화면 준비가 끝나면(app_ready) 보인다
     )
+    splash = None
+    if intro:
+        try:
+            splash = webview.create_window(APP_NAME, html=intro, width=420, height=420, frameless=True,
+                                           resizable=False, on_top=True, easy_drag=True, background_color="#f4f8f6")
+        except Exception:
+            splash = None
+    if intro and splash is None:
+        window.show()
     api.attach(window)
+    api.attach_splash(splash)
     webview.start()
 
 
