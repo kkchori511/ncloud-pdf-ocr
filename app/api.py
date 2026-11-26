@@ -2,6 +2,7 @@
 
 오래 걸리는 작업은 스레드로 돌리고, 진행 상황은 window.onAppEvent(...)로 화면에 보낸다.
 """
+import base64
 import json
 import os
 import re
@@ -13,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import webview
 
-from . import APP_NAME, MAKER, PAGES_URL, TAGLINE, VERSION, config, excel, ocr, ocr_layout, openrouter, scan, updater
+from . import APP_NAME, MAKER, PAGES_URL, TAGLINE, VERSION, config, excel, ocr, ocr_compare, ocr_layout, ocr_vision, openrouter, scan, updater
+from .session import Session
 from .prompts import REFINE_FORMAT, REFINE_FORMAT_IDS, TRANSFORM_FORMAT, example_rule, length_rule
 from .textutil import count_bytes
 
@@ -55,7 +57,7 @@ class Api:
         self._window = None
         self._busy = threading.Lock()
         self._stop = threading.Event()
-        self._scan = None  # {"path", "pages": [CLOVA 쪽 결과 또는 None], "modes": {쪽: 2단 나누기 방식}}
+        self._scan = None  # session.Session: 고른 PDF 하나의 OCR 결과·검토
         self._images = {}
         self._update_info = None
         self._update_ready = ""
@@ -154,120 +156,222 @@ class Api:
             return {"ok": False, "error": "PDF를 열지 못했습니다."}
         if not pages:
             return {"ok": False, "error": "PDF에 페이지가 없습니다."}
-        self._scan = {"path": path, "pages": [None] * pages, "modes": {}}
+        self._scan = Session(path, pages)
         self._images = {}
         return {"ok": True, "path": path, "name": os.path.basename(path), "pages": pages}
 
-    def _missing_keys(self, cfg):
-        return [
-            label
-            for key, label in (
-                ("clova_url", "CLOVA Invoke URL"),
-                ("clova_secret", "CLOVA Secret Key"),
-                ("openrouter_key", "OpenRouter API 키"),
-                ("refine_model", "정제 모델"),
-            )
-            if not str(cfg.get(key, "")).strip()
-        ]
+    def _missing_keys(self, cfg, clova=True):
+        keys = [("openrouter_key", "OpenRouter API 키"), ("refine_model", "정제 모델")]
+        if clova:
+            keys = [("clova_url", "CLOVA Invoke URL"), ("clova_secret", "CLOVA Secret Key")] + keys
+        return [label for key, label in keys if not str(cfg.get(key, "")).strip()]
 
     # ---------- 1단계: OCR ----------
-    def start_ocr(self, only_missing=False):
-        """CLOVA OCR. only_missing이면 아직 못 읽었거나 실패한 쪽만 다시 읽는다."""
+    def mask_preview(self, mask):
+        """첫 쪽을 Qwen에 보낼 모양(위쪽 가림)으로. 이 PC 안에서만 그린다."""
         if not self._scan:
             return {"ok": False, "error": "먼저 PDF를 선택해 주세요."}
+        try:
+            mask = max(0.0, min(0.4, float(mask or 0)))
+            png = ocr_vision.render_png(self._scan.path, 0, mask, width=520)
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception:
+            return {"ok": False, "error": "미리보기를 그리지 못했습니다."}
+        return {"ok": True, "src": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}
+
+    def start_ocr(self, only_missing=False, mode="clova", mask=None):
+        """읽기. mode: clova | ai | hybrid. only_missing이면 아직 못 읽었거나 실패한 쪽만(이미 읽은 엔진·쪽은 다시 부르지 않음)."""
+        sc = self._scan
+        if not sc:
+            return {"ok": False, "error": "먼저 PDF를 선택해 주세요."}
         cfg = config.load()
-        missing = self._missing_keys(cfg)
+        mode = mode if mode in ("clova", "ai", "hybrid") else "clova"
+        need_c = mode in ("clova", "hybrid")
+        missing = self._missing_keys(cfg, clova=need_c)
         if missing:
             return {"ok": False, "error": "설정에서 먼저 입력해 주세요: " + ", ".join(missing)}
-        pages = None
-        if only_missing:
-            pages = [i for i, p in enumerate(self._scan["pages"]) if not p or p.get("fail")]
-            if not pages:
-                return {"ok": False, "error": "다시 읽을 쪽이 없습니다."}
-        else:
-            self._scan["pages"] = [None] * len(self._scan["pages"])
-            self._scan["modes"] = {}
-        return self._run_bg(self._ocr, self._scan, pages, cfg)
-
-    def _ocr(self, sc, pages, cfg):
-        def progress(n, total_chunks, total_pages):
-            if n == 0:
-                count = len(pages) if pages is not None else total_pages
-                self._step("split", "done", text=f"{count}페이지 → {total_chunks}구간")
-            self._step("ocr", "active", done=n, total=total_chunks)
-
-        def on_chunk(got):
-            for i, page in got.items():
-                sc["pages"][i] = page
-
-        self._step("split", "active")
-        stopped = False
         try:
-            ocr.ocr_pdf_pages(
-                sc["path"], cfg["clova_url"].strip(), cfg["clova_secret"].strip(), cfg["ocr_lang"],
-                progress, self._stop.is_set, pages, on_chunk,
-            )
-            self._step("ocr", "done", text="완료")
-        except ocr.Stopped:
-            stopped = True
-        self._emit({"type": "ocr_done", "stopped": stopped, "pages": self.scan_pages()})
+            mask = float(cfg["ocr_mask"] if mask is None else mask)
+        except (TypeError, ValueError):
+            mask = -1.0
+        if mode != "clova" and not 0 <= mask <= 0.4:  # NaN도 여기서 걸림
+            return {"ok": False, "error": "머리글 가림 비율이 올바르지 않습니다(0~40%)."}
+        if not only_missing:
+            self._scan = sc = Session(sc.path, sc.n)
+            sc.cols, sc.side = cfg.get("layout_mode", "auto"), cfg.get("read_side", "both")
+        sc.set_mode(mode, mask, cfg["ocr_ai_model"])
+        if sc.need_ai and float(sc.ai.get("mask") or 0) <= 0 and not cfg["ocr_ai_consent"]:
+            return {"ok": False, "error": "머리글을 가리지 않은 그림(이름·학번 포함)을 Qwen에 보내려면 설정에서 먼저 전송에 동의해 주세요."}
+        todo_c, todo_a = sc.todo()
+        if not todo_c and not todo_a:
+            if only_missing:
+                return {"ok": False, "error": "다시 읽을 쪽이 없습니다."}
+        return self._run_bg(self._ocr, sc, todo_c, todo_a, cfg)
 
-    def _mode_of(self, i):
-        return self._scan["modes"].get(i) or config.load().get("layout_mode", "auto")
+    def _ocr(self, sc, todo_c, todo_a, cfg):
+        errs = {}
+        ai_cost = [0.0]
 
-    def _arranged(self, i):
-        page = self._scan["pages"][i]
-        if not page:
-            return None
-        return ocr_layout.arrange(page, self._mode_of(i))
+        def run_clova():
+            def progress(n, total_chunks, total_pages):
+                if n == 0:
+                    self._step("split", "done", text=f"{len(todo_c)}페이지 → {total_chunks}구간")
+                self._step("ocr", "active", done=n, total=total_chunks)
 
-    def _page_text(self, i):
-        page = self._arranged(i)
-        if not page or page.get("fail"):
-            return ""
-        return ocr.page_text(page)
+            def on_chunk(got):
+                with sc.lock:
+                    for i, page in got.items():
+                        sc.clova[i] = page
+
+            self._step("split", "active")
+            try:
+                ocr.ocr_pdf_pages(sc.path, cfg["clova_url"].strip(), cfg["clova_secret"].strip(), cfg["ocr_lang"],
+                                  progress, self._stop.is_set, todo_c, on_chunk)
+                self._step("ocr", "done", text="완료")
+            except ocr.Stopped:
+                errs["stopped"] = True
+            except Exception as e:
+                errs["clova"] = str(e)
+
+        def run_ai():
+            key, model, mask = cfg["openrouter_key"].strip(), sc.ai["model"], float(sc.ai["mask"] or 0)
+            fatal = {}
+            done = [0]
+            lock = threading.Lock()
+
+            def one(i):
+                if self._stop.is_set():
+                    return
+                if fatal:
+                    res = {"error": fatal["msg"], "sent": False}
+                else:
+                    try:
+                        keep = sc.keep_of(i)
+                        png = ocr_vision.render_png(sc.path, i, mask, **({"keep": keep} if keep else {}))
+                        res = ocr_vision.read_page(key, model, png)
+                        res = {k: res[k] for k in ("lines", "figures", "cost", "provider", "model")}
+                    except ocr_vision.VisionError as e:
+                        if e.code in ("key", "balance", "provider"):
+                            fatal.setdefault("msg", str(e))
+                        res = {"error": str(e), "sent": True}
+                    except Exception as e:  # 그림 만들기 실패 등
+                        res = {"error": f"이 쪽을 읽지 못했습니다({e.__class__.__name__}).", "sent": False}
+                with sc.lock:
+                    sc.ai["pages"][i] = res
+                    sc.ai["cost"] = round(sc.ai["cost"] + float(res.get("cost") or 0), 6)
+                with lock:
+                    ai_cost[0] += float(res.get("cost") or 0)
+                    done[0] += 1
+                    self._step("ai", "active", done=done[0], total=len(todo_a))
+
+            self._step("ai", "active", done=0, total=len(todo_a))
+            # 중지해도 이미 보낸 쪽은 끝까지 받아 둔다(이미 비용이 든 결과를 버리지 않음)
+            with ThreadPoolExecutor(3) as ex:
+                list(ex.map(one, todo_a))
+            self._step("ai", "done", done=done[0], total=len(todo_a))
+            if fatal:
+                errs["ai_fatal"] = fatal["msg"]
+
+        ts = []
+        if todo_c:
+            ts.append(threading.Thread(target=run_clova, daemon=True))
+        if todo_a:
+            ts.append(threading.Thread(target=run_ai, daemon=True))
+        # 한쪽 단만 읽을 때는 CLOVA로 단 경계를 찾은 뒤 Qwen에 그 경계로 자른 그림을 보낸다
+        one_side = sc.side != "both" or any((o.get("side") or "both") != "both" for o in sc.page_opts.values())
+        if one_side and len(ts) == 2:
+            for t in ts:
+                t.start()
+                t.join()
+        else:
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        if errs.get("clova"):
+            raise ocr.OcrError(errs["clova"])
+        ai_failed = sum(1 for x in sc.ai["pages"] if x and x.get("error")) if sc.need_ai else 0
+        self._emit({"type": "ocr_done", "stopped": bool(errs.get("stopped") or self._stop.is_set()),
+                    "pages": self.scan_pages(), "mode": sc.mode, "ai_failed": ai_failed,
+                    "ai_message": errs.get("ai_fatal", ""), "cost": ai_cost[0],
+                    "balance": openrouter.balance(cfg["openrouter_key"].strip()) if todo_a else None})
 
     def scan_pages(self):
-        """쪽마다 요약: 읽었는지, 실패 이유, 글자 수, 2단 여부, 기울기 경고."""
-        out = []
-        if not self._scan:
-            return out
-        for i, raw in enumerate(self._scan["pages"]):
-            if not raw:
-                out.append({"index": i, "read": False})
-                continue
-            page = self._arranged(i)
-            lay = page.get("layout") or {}
-            out.append({
-                "index": i, "read": True, "fail": page.get("fail") or "",
-                "chars": len(ocr.page_text(page)) if not page.get("fail") else 0,
-                "cols": lay.get("cols", 1), "warn": bool(lay.get("warn")),
-            })
-        return out
+        """쪽마다 요약: 읽었는지, 실패, 글자 수, 2단 여부, 기울기 경고, 하이브리드 남은 차이."""
+        sc = self._scan
+        return [sc.summary(i) for i in range(sc.n)] if sc else []
 
     def page_detail(self, i):
-        """원본 보기: 그 쪽의 OCR 글자와 배치 정보."""
+        """원본 보기: 그 쪽의 OCR 글자·차이·배치."""
         i = int(i)
-        if not self._scan or not 0 <= i < len(self._scan["pages"]):
+        if not self._scan or not 0 <= i < self._scan.n:
             return {"ok": False, "error": "없는 쪽입니다."}
-        page = self._arranged(i)
-        if not page:
-            return {"ok": True, "index": i, "read": False, "text": "", "mode": self._scan["modes"].get(i, "")}
-        lay = page.get("layout") or {}
-        return {
-            "ok": True, "index": i, "read": True, "fail": page.get("fail") or "",
-            "text": ocr.page_text(page), "mode": self._scan["modes"].get(i, ""),
-            "cols": lay.get("cols", 1), "warn": bool(lay.get("warn")), "deg": lay.get("measured", 0),
-        }
+        return self._scan.detail(i)
 
-    def set_page_mode(self, i, mode):
-        """한 쪽만 2단 나누기 방식을 바꾼다. 빈 값이면 설정을 따른다."""
-        i = int(i)
-        if mode in ocr_layout.MODES:
-            self._scan["modes"][i] = mode
-        else:
-            self._scan["modes"].pop(i, None)
-        return self.page_detail(i)
+    def set_layout(self, i, cols=None, side=None):
+        """단 나누기·읽을 단 바꾸기. i가 None이면 전체(설정에도 저장), 아니면 그 쪽만(빈 값이면 전체를 따름).
+        CLOVA는 다시 부르지 않는다. 읽을 단이 바뀐 쪽의 Qwen 결과는 지운다(다시 읽어야 함)."""
+        if i is None:
+            patch = {}
+            if cols in ocr_layout.MODES:
+                patch["layout_mode"] = cols
+            if side in ocr_layout.SIDES:
+                patch["read_side"] = side
+            if patch:
+                config.save(patch)
+        if not self._scan:
+            return {"ok": True, "ai_reset": 0}
+        if self._busy.locked():
+            return {"ok": False, "error": "작업이 끝난 뒤에 바꿔 주세요."}
+        r = self._scan.set_layout(None if i is None else int(i), cols, side)
+        out = {"ok": True, "ai_reset": r["ai_reset"]}
+        if i is not None:
+            out["detail"] = self._scan.detail(int(i))
+        return out
+
+    def decide(self, i, data):
+        """하이브리드 검토: 차이·쪽 고르기, 직접 고치기."""
+        if not self._scan:
+            return {"ok": False, "error": "PDF가 없습니다."}
+        if self._busy.locked():
+            return {"ok": False, "error": "작업이 끝난 뒤에 해 주세요."}
+        return self._scan.decide(int(i), data)
+
+    def suggest(self, i):
+        """[AI 제안]: 차이 난 곳의 두 후보와 앞뒤 문맥만 글 AI에 보낸다(그림 없음, 학번·이름은 ○로 지움). 고르기는 사람이."""
+        sc = self._scan
+        if not sc:
+            return {"ok": False, "error": "PDF가 없습니다."}
+        cfg = config.load()
+        key = cfg["openrouter_key"].strip()
+        model = (cfg.get("ocr_fix_model") or "").strip() or (cfg.get("refine_model") or "").strip()
+        if not key or not model:
+            return {"ok": False, "error": "설정에서 OpenRouter API 키와 정제 모델(또는 OCR 보정 모델)을 넣어 주세요."}
+        cmp = sc.compare(int(i))
+        if not cmp or cmp["big"]:
+            return {"ok": False, "error": "이 쪽은 차이별 제안을 받을 수 없습니다(비교할 두 결과가 없거나 크게 다름)."}
+        if not any(d["kind"] == "text" for d in cmp["diffs"]):
+            return {"ok": False, "error": "이 쪽에는 고를 차이가 없습니다."}
+        user = ocr_compare.fix_user(cmp, sc.scrubber(cmp))
+        try:
+            text, cost = openrouter.chat(key, model, ocr_compare.FIX_SYSTEM, user)
+        except openrouter.LlmError as e:
+            return {"ok": False, "error": str(e)}
+        sugg = ocr_compare.parse_fix(openrouter.parse_json_object(text), cmp["diffs"])
+        if not sugg:
+            return {"ok": False, "error": "AI 제안을 해석하지 못했습니다. 다시 시도하거나 설정에서 OCR 보정 모델을 바꿔 보세요."}
+        sc.store_suggest(int(i), sugg, cost)
+        return {**sc.detail(int(i)), "suggest_cost": cost}
+
+    def diff_crop(self, i, box, w, h, clip=None):
+        """차이 난 줄의 원본 확대 그림(이 PC 안에서만)."""
+        if not self._scan:
+            return {"ok": False, "error": "PDF가 없습니다."}
+        try:
+            return {"ok": True, "src": scan.render_crop(self._scan.path, int(i), box, w, h, clip)}
+        except Exception as e:
+            return {"ok": False, "error": str(e) if isinstance(e, FileNotFoundError) else "그림을 그리지 못했습니다."}
 
     def page_image(self, i, width=900):
         """원본 쪽 그림(PNG data URL). 이 PC 안에서만 그린다."""
@@ -276,20 +380,19 @@ class Api:
         key = (int(i), int(width))
         if key not in self._images:
             try:
-                self._images[key] = scan.render_page(self._scan["path"], key[0], key[1])
+                self._images[key] = scan.render_page(self._scan.path, key[0], key[1])
             except Exception as e:
                 return {"ok": False, "error": str(e) if isinstance(e, FileNotFoundError) else "그림을 그리지 못했습니다."}
         return {"ok": True, "src": self._images[key]}
 
     def default_groups(self, per):
-        n = len(self._scan["pages"]) if self._scan else 0
-        return [g for g in scan.default_groups(n, per)]
+        return scan.default_groups(self._scan.n if self._scan else 0, per)
 
     def _ids_of(self, group):
         """학생 한 명(쪽 목록)의 학번·이름을 규칙으로(AI 없이). 첫 쪽부터 보고, 빈 값은 다음 쪽에서 채운다."""
         no = name = ""
         for p in group:
-            n2, m2 = scan.extract_ids(self._page_text(p), [])
+            n2, m2 = scan.extract_ids(self._scan.final_text(p), [])
             no, name = no or n2, name or m2
             if no and name:
                 break
@@ -297,11 +400,7 @@ class Api:
 
     def preview_groups(self, groups):
         """묶기 확인: 학생마다 규칙으로 찾은 학번·이름."""
-        out = []
-        for g in groups:
-            no, name = self._ids_of(g)
-            out.append({"pages": g, "student_id": no, "name": name})
-        return out
+        return [{"pages": g, **dict(zip(("student_id", "name"), self._ids_of(g)))} for g in groups]
 
     # ---------- 1단계: 정제 ----------
     def start_refine(self, groups):
@@ -333,8 +432,8 @@ class Api:
 
         def refine(item):
             i, g = item
-            texts = [self._page_text(p) for p in g]
-            unread = [p + 1 for p in g if not self._scan["pages"][p] or self._scan["pages"][p].get("fail")]
+            texts = [self._scan.final_text(p) for p in g]
+            unread = [p + 1 for p in g if not self._scan.read_ok(p)]
             no, name = self._ids_of(g)
             content = scan.strip_pages(texts, no, name, [])
             out = {"index": i, "pages": page_label(g), "page_list": g, "student_id": no, "name": name,

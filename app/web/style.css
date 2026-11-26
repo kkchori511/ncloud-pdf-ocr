@@ -417,3 +417,56 @@ button.mini.on { background: var(--accent); border-color: var(--accent); color: 
 .about-update { font-size: 13px; margin-top: 4px; }
 .about-share { white-space: normal; margin-top: 16px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; line-height: 1.6; }
 #modal.wide .modal-box { width: min(560px, 92vw); }
+
+/* ---------- Qwen 가림 ---------- */
+.mask-box { display: grid; grid-template-columns: 1fr 260px; gap: 18px; margin-top: 14px; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.mask-box[hidden] { display: none; }
+.mask-left label { margin-top: 0; }
+.mask-preview { background: var(--input); border: 1px solid var(--border); border-radius: 6px; max-height: 200px; overflow: hidden; display: flex; align-items: flex-start; justify-content: center; }
+.mask-preview img { width: 100%; display: block; }
+.mask-preview img:not([src]) { display: none; }
+.mask-preview .muted { padding: 16px; font-size: 13px; }
+label.check-line.consent { margin-top: 14px; }
+.badge.warn { background: var(--warn-bg); border-color: var(--warn-border); color: #8a6a00; }
+.badge.warn.done { background: #e6f6ea; border-color: #7cc48d; color: #1f7a37; }
+
+/* ---------- 원본 보기: 그림 위 표시 ---------- */
+.img-wrap { position: relative; }
+.img-wrap img { width: 100%; display: block; }
+.img-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ov-drop { fill: rgba(60, 70, 85, 0.35); }
+.ov-line { stroke: var(--danger); stroke-width: 3; stroke-dasharray: 12 8; }
+.ov-mask { fill: rgba(255, 255, 255, 0.82); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 8 6; }
+.ov-mask-text { fill: var(--accent-hover); font-weight: 800; text-anchor: middle; dominant-baseline: middle; }
+.viewer-text { overflow: auto; padding-right: 4px; }
+.viewer-text pre { flex: none; min-height: 120px; }
+.viewer-meta { flex-wrap: wrap; }
+.warn-line:empty { display: none; }
+.warn-line { color: var(--danger); margin: 0 0 8px; }
+.final-head { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px; }
+.final-head .check-line { margin: 0; }
+#viewerEdit textarea { width: 100%; }
+.right.gap { gap: 8px; }
+.prompt-input { margin-top: 10px; }
+
+/* ---------- 하이브리드 검토 ---------- */
+.review-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.diff-list { display: flex; flex-direction: column; gap: 10px; }
+.diff { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--input); }
+.diff.decided { border-color: #7cc48d; background: #f3fbf5; }
+.diff-crop { display: block; width: 100%; max-height: 90px; object-fit: contain; object-position: left; background: var(--surface-2); border-radius: 4px; margin-bottom: 6px; }
+.diff-ctx { font-size: 14px; margin-bottom: 6px; word-break: break-all; }
+.diff-ctx mark { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 3px; padding: 0 3px; }
+.diff-btns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+button.pick { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; white-space: normal; text-align: left; padding: 6px 10px; }
+button.pick small { font-size: 11px; color: var(--muted); font-weight: 700; }
+button.pick span { font-size: 15px; word-break: break-all; }
+button.pick.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.pick.on small { color: #dbe6ff; }
+.diff-sugg { margin-top: 6px; font-size: 13px; color: var(--accent-hover); font-weight: 600; }
+.diff-sugg.new { color: var(--danger); }
+.big-pick { gap: 10px; }
+.big-col { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; background: var(--input); }
+.big-col.picked { border: 2px solid var(--accent); }
+.big-col-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.big-col pre { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; font-family: var(--font); font-size: 14px; }

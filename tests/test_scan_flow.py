@@ -96,8 +96,8 @@ def test():
     assert img["ok"] and img["src"].startswith("data:image/png;base64,"), img
     d = api.page_detail(2)
     assert d["ok"] and "이영희" in d["text"], d
-    assert api.set_page_mode(2, "off")["mode"] == "off"
-    assert api.set_page_mode(2, "")["mode"] == ""
+    assert api.set_layout(2, "off")["detail"]["cols_own"] == "off"
+    assert api.set_layout(2, "")["detail"]["cols_own"] == ""
 
     # 묶기: 3명 × 2쪽, 마지막 백지 쪽 빼기
     groups = api.default_groups(2)

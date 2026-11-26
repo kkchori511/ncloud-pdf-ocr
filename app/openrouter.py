@@ -7,6 +7,7 @@ import time
 import requests
 
 BASE = "https://openrouter.ai/api/v1"
+DOWN = (500, 502, 503, 504, 520, 521, 522, 523, 524)  # 잠깐 장애(다시 시도할 만함)
 MODELS_PAGE = "https://openrouter.ai/models"
 
 _models_cache = {"at": 0.0, "data": None}

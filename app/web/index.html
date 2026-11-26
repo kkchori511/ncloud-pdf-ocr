@@ -58,6 +58,13 @@
               <li><b>문장 완성</b>: 끊긴 문장까지 자연스럽게 완성합니다. 새 내용은 넣지 않습니다.</li>
             </ul>
           </li>
+          <li><b>읽는 방식</b>: <b>CLOVA만</b>(기본), <b>Qwen만</b>(페이지 그림을 Qwen에 보냄, CLOVA 키 없이도 됨), <b>하이브리드</b>(둘 다 읽고 다르게 읽은 곳만 고름) 중에서 고릅니다. Qwen 설정은 <b>설정 &gt; Qwen으로 스캔 읽기</b>에 있습니다.
+            <ul>
+              <li>Qwen에 보낼 때는 <b>위쪽 가리기</b> 비율만큼 페이지 위쪽을 흰색으로 덮어 학번·이름이 나가지 않게 합니다(기본 12%). 첫 쪽 미리보기로 맞추세요.</li>
+              <li>하이브리드는 원본 보기에서 다르게 읽은 줄마다 원본 확대 그림을 보며 [CLOVA]·[Qwen]·[고치기] 중에 고릅니다. [AI 제안]은 그림 없이 그 글자와 앞뒤 문맥만 보내 어느 쪽이 맞을지 추천받습니다(학번·이름은 ○로 지움). 고르지 않은 곳은 CLOVA 글이 들어갑니다.</li>
+            </ul>
+          </li>
+          <li><b>읽을 단</b>: 한쪽 단이 인쇄된 지문이면 [왼쪽만]·[오른쪽만]을 고릅니다. 빼는 단 맨 위의 학번·이름 줄은 남깁니다. Qwen에는 그 단만 잘라 보냅니다. 원본 보기에서 쪽마다 따로 바꿀 수 있고, 단 경계는 점선, 빼는 단은 회색으로 보입니다.</li>
           <li><b>2단 나누기</b>: 가로로 놓인 A3처럼 한 쪽에 글이 두 단이면, 자동으로 왼쪽 단을 다 읽은 뒤 오른쪽 단을 읽습니다. 섞여 나오면 [항상 2단으로], 한 단짜리인데 잘못 나뉘면 [나누지 않음]을 고르세요. 기울어진 스캔은 조금(10도 이하) 바로잡고, 너무 기울면 다시 스캔하라고 알려 줍니다.</li>
           <li>[1단계 시작]을 누르면 진행 창이 뜹니다. OCR은 10페이지씩 나눠 읽습니다. 경과 시간이 올라가고 있으면 정상 진행 중입니다. 잘못 시작했다면 [중지]를 누르세요. 중지해도 이미 읽은 쪽은 남고, [못 읽은 쪽 다시 읽기]로 나머지만 읽습니다.</li>
           <li><b>묶기 확인</b>: 페이지 그림이 학생별로 나옵니다. 학생마다 장수가 다르면 그 학생 첫 페이지의 <b>[새 학생]</b>을 누르고, 백지나 표지는 <b>[빼기]</b>를 누릅니다. 페이지를 누르면 원본과 OCR 글자를 나란히 봅니다.</li>
@@ -185,6 +192,21 @@
     </div>
 
     <div class="card">
+      <h2>Qwen으로 스캔 읽기 (OpenRouter)</h2>
+      <p class="hint">작업 공간에서 읽는 방식을 <b>Qwen만</b>이나 <b>하이브리드</b>로 고르면 페이지 그림을 그림 읽는 AI(Qwen)에 보냅니다. 위의 OpenRouter 키를 씁니다.
+        쪽마다 한 번 보내며 쪽당 약 1~3원이 듭니다. 그림을 보낼 때는 <b>학습 차단·보존 안 함</b>(<code>data_collection: deny</code>, <code>zdr: true</code>)을 항상 켜고, 이 조건을 받는 곳이 없으면 보내지 않습니다.</p>
+      <label for="ocrAiModel">그림 읽기 모델</label>
+      <select id="ocrAiModel" data-cfg="ocr_ai_model">
+        <option value="qwen/qwen3-vl-235b-a22b-instruct">Qwen3 VL 235B (기본, 정확도 우선)</option>
+        <option value="qwen/qwen3-vl-8b-instruct">Qwen3 VL 8B (조금 싸고 빠름)</option>
+      </select>
+      <label for="ocrFixModel">OCR 보정 모델 (하이브리드 검토의 [AI 제안])</label>
+      <input type="text" id="ocrFixModel" data-cfg="ocr_fix_model" placeholder="비워 두면 정제 모델을 씁니다 (예: google/gemini-2.5-flash)">
+      <div class="hint">그림 없이, 두 OCR이 다르게 읽은 곳의 글자와 앞뒤 문맥만 보냅니다. 학번·이름 칸의 값은 ○로 지우지만, 본문에 쓴 다른 사람 이름까지 다 찾지는 못합니다.</div>
+      <label class="check-line consent"><input type="checkbox" id="ocrAiConsent"> 위쪽 가림 0%로 Qwen에 보내는 데 동의함 (이름·학번이 담긴 그림이 전송됨)</label>
+    </div>
+
+    <div class="card">
       <h2>정제 프롬프트</h2>
       <p class="hint">학번, 이름 찾기와 결과 형식(JSON)은 프로그램이 자동으로 덧붙입니다. 여기서는 교정 규칙만 고치세요.</p>
       <div class="two-col">
@@ -233,6 +255,14 @@
         </div>
         <div class="row row-2">
           <div class="field">
+            <label>읽는 방식</label>
+            <div class="segmented" id="engineSeg">
+              <label title="CLOVA OCR로 읽습니다."><input type="radio" name="ocrEngine" value="clova"><span>CLOVA만</span></label>
+              <label title="페이지 그림을 Qwen에 보내 읽습니다. CLOVA 키가 없어도 됩니다."><input type="radio" name="ocrEngine" value="ai"><span>Qwen만</span></label>
+              <label title="둘 다 읽고 다르게 읽은 곳만 원본을 보며 고릅니다(시간·비용 더 듦)."><input type="radio" name="ocrEngine" value="hybrid"><span>하이브리드</span></label>
+            </div>
+          </div>
+          <div class="field">
             <label for="layoutMode">2단 나누기</label>
             <select id="layoutMode">
               <option value="auto">자동 (두 단이면 왼쪽 → 오른쪽 순서로)</option>
@@ -240,7 +270,25 @@
               <option value="two">항상 2단으로</option>
             </select>
           </div>
+          <div class="field">
+            <label for="readSide">읽을 단</label>
+            <select id="readSide">
+              <option value="both">둘 다</option>
+              <option value="left">왼쪽만 (오른쪽은 지문 등)</option>
+              <option value="right">오른쪽만 (왼쪽은 지문 등)</option>
+            </select>
+          </div>
           <label class="check-line"><input type="checkbox" id="skipGroupCheck"> 묶기 확인 없이 OCR 뒤 바로 정제</label>
+        </div>
+        <div class="mask-box" id="maskBox" hidden>
+          <div class="mask-left">
+            <label for="maskPct">Qwen에 보낼 때 위쪽 가리기</label>
+            <div class="inline"><input type="number" id="maskPct" class="num" min="0" max="40" step="1"><span class="unit">%</span></div>
+            <p class="hint">학번·이름 칸이 있는 위쪽을 흰색으로 덮어 보냅니다(이 PC 안에서 덮음). 오른쪽 미리보기에서 머리글이 다 가려지는지 확인하세요.
+              이미 Qwen에 보낸 쪽이 있으면 처음 비율을 그대로 씁니다. 0%로 보내려면 설정에서 동의가 필요합니다.</p>
+            <p class="hint">Qwen만으로 읽으면 가린 머리글의 학번·이름을 찾을 수 없어 노란 칸으로 남습니다. 하이브리드는 가린 곳을 CLOVA 글로 채웁니다.</p>
+          </div>
+          <div class="mask-preview"><img id="maskPreview" alt="첫 쪽 가림 미리보기"><span id="maskPreviewMsg" class="muted">PDF를 고르면 첫 쪽 미리보기가 나옵니다.</span></div>
         </div>
         <div id="pageWarn" class="warn" hidden></div>
         <button type="button" class="primary block" id="stage1Btn">1단계 시작 (OCR - 묶기 확인 - 정제)</button>
@@ -255,7 +303,7 @@
             <button type="button" id="rereadBtn" hidden>못 읽은 쪽 다시 읽기</button>
             <button type="button" class="primary" id="refineBtn">정제 시작</button>
           </div>
-          <p class="hint">페이지를 누르면 원본과 OCR 글자를 크게 봅니다. <b>[새 학생]</b>은 그 페이지부터 다음 학생, <b>[빼기]</b>는 정제에서 뺍니다.
+          <p class="hint">페이지를 누르면 원본과 OCR 글자를 크게 봅니다. 하이브리드면 거기서 <b>다르게 읽은 곳</b>을 고릅니다(고르지 않은 곳은 CLOVA 글). <b>[새 학생]</b>은 그 페이지부터 다음 학생, <b>[빼기]</b>는 정제에서 뺍니다.
             학번·이름은 머리글에서 규칙으로 찾은 값이고, 못 찾은 학생은 정제할 때 AI가 머리글을 보고 찾습니다.</p>
           <div id="groupList"></div>
         </div>
@@ -352,20 +400,39 @@
       <button type="button" class="primary" id="viewerClose">닫기</button>
     </div>
     <div class="viewer-body">
-      <div class="viewer-img"><img id="viewerImg" alt="원본 쪽"><div id="viewerImgMsg" class="muted"></div></div>
+      <div class="viewer-img"><div class="img-wrap" id="viewerWrap"><img id="viewerImg" alt="원본 쪽"><svg id="viewerOverlay" preserveAspectRatio="none"></svg></div><div id="viewerImgMsg" class="muted"></div></div>
       <div class="viewer-text">
         <div class="viewer-meta">
-          <label for="viewerMode" class="inline-label">이 쪽 2단 나누기</label>
+          <label for="viewerMode" class="inline-label">2단 나누기</label>
           <select id="viewerMode">
             <option value="">설정 따름</option>
             <option value="auto">자동</option>
             <option value="off">나누지 않음</option>
             <option value="two">2단으로</option>
           </select>
+          <label for="viewerSide" class="inline-label">읽을 단</label>
+          <select id="viewerSide">
+            <option value="">설정 따름</option>
+            <option value="both">둘 다</option>
+            <option value="left">왼쪽만</option>
+            <option value="right">오른쪽만</option>
+          </select>
           <span id="viewerBadge" class="badge"></span>
         </div>
+        <div class="hint warn-line" id="viewerHint"></div>
+        <div id="viewerReview"></div>
+        <div class="final-head">
+          <b>정제에 쓸 글</b>
+          <span class="muted small" id="viewerFinalNote"></span>
+          <span class="spacer"></span>
+          <label class="check-line small" id="viewerFigsWrap" hidden><input type="checkbox" id="viewerFigs"> Qwen 그림 설명 넣기</label>
+          <button type="button" class="mini" id="viewerEditBtn">직접 고치기</button>
+        </div>
         <pre id="viewerText"></pre>
-        <div class="hint" id="viewerHint"></div>
+        <div id="viewerEdit" hidden>
+          <textarea id="viewerEditText" rows="12"></textarea>
+          <div class="right gap"><button type="button" id="viewerEditCancel">취소</button><button type="button" id="viewerEditClear" hidden>직접 고친 것 지우기</button><button type="button" class="primary" id="viewerEditSave">저장</button></div>
+        </div>
       </div>
     </div>
   </div>

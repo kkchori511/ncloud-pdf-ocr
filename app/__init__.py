@@ -1,5 +1,5 @@
 APP_NAME = "악필교정기"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 MAKER = "Made by 김한량 디지털 공방"
 TAGLINE = "손글씨 과제 스캔을 읽고 다듬어 엑셀로 정리합니다."
 GITHUB_REPO = "kkchori511/ncloud-pdf-ocr"

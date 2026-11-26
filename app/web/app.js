@@ -82,8 +82,15 @@
   let progTimer = null;
   let progJob = null;
 
+  // 읽는 방식에 따른 OCR 단계
+  function ocrJob(engine) {
+    const steps = [];
+    if (engine !== 'ai') steps.push({ key: 'split', label: 'PDF 분할' }, { key: 'ocr', label: 'CLOVA', unit: '구간' });
+    if (engine !== 'clova') steps.push({ key: 'ai', label: 'Qwen', unit: '쪽' });
+    return { title: '1단계 OCR 중', steps };
+  }
   function openProgress(job) {
-    progJob = JOBS[job];
+    progJob = typeof job === 'string' ? JOBS[job] : job;
     $('progTitle').textContent = progJob.title;
     const ul = $('progSteps');
     ul.innerHTML = '';
@@ -187,6 +194,11 @@
     document.querySelectorAll('input[name="refineMode"]').forEach((r) => { r.checked = r.value === cfg.refine_mode; });
     $('perStudent').value = cfg.pages_per_student || 1;
     $('layoutMode').value = cfg.layout_mode || 'auto';
+    $('readSide').value = cfg.read_side || 'both';
+    document.querySelectorAll('input[name="ocrEngine"]').forEach((r) => { r.checked = r.value === (cfg.ocr_engine || 'clova'); });
+    $('maskPct').value = Math.round((cfg.ocr_mask ?? 0.12) * 100);
+    $('ocrAiConsent').checked = !!cfg.ocr_ai_consent;
+    showMaskBox();
     $('skipGroupCheck').checked = !!cfg.skip_group_check;
     $('targetBytes').value = cfg.target_bytes ?? 1500;
     document.querySelectorAll('.model-row').forEach((row) => showPrice(row));
@@ -250,6 +262,13 @@
       await api.save_config({ refine_prompts: null });
       cfg = await api.load_config();
       fillSettings();
+    });
+    $('ocrAiConsent').addEventListener('change', async () => {
+      if ($('ocrAiConsent').checked && !(await confirmBox('위쪽을 가리지 않은(0%) 그림을 Qwen에 보내면 학번·이름이 담긴 그림이 OpenRouter와 그 제공업체로 전송됩니다. 동의하시나요?'))) {
+        $('ocrAiConsent').checked = false;
+        return;
+      }
+      updateCfg({ ocr_ai_consent: $('ocrAiConsent').checked });
     });
     document.querySelectorAll('input[name="refineMode"]').forEach((r) => {
       r.addEventListener('change', () => updateCfg({ refine_mode: r.value }));
@@ -336,6 +355,26 @@
     $('stage1').classList.toggle('collapsed', collapsed);
     requestAnimationFrame(sizePromptAreas);
   }
+  function engine() { return (document.querySelector('input[name="ocrEngine"]:checked') || {}).value || 'clova'; }
+  function maskValue() { return Math.max(0, Math.min(40, parseFloat($('maskPct').value) || 0)) / 100; }
+  function showMaskBox() { $('maskBox').hidden = engine() === 'clova'; refreshMaskPreview(); }
+  const refreshMaskPreview = debounce(async () => {
+    if ($('maskBox').hidden) return;
+    if (!pdf) { $('maskPreview').removeAttribute('src'); $('maskPreviewMsg').textContent = 'PDF를 고르면 첫 쪽 미리보기가 나옵니다.'; return; }
+    const r = await api.mask_preview(maskValue());
+    if (r.ok) { $('maskPreview').src = r.src; $('maskPreviewMsg').textContent = ''; } else $('maskPreviewMsg').textContent = r.error;
+  }, 250);
+
+  async function startOcr(onlyMissing) {
+    await flushNow();
+    const eng = engine();
+    const r = await api.start_ocr(onlyMissing, eng, maskValue());
+    if (!r.ok) { if (onlyMissing) alertBox(r.error); else setStatus('error', r.error); return false; }
+    setBusy(true);
+    openProgress(ocrJob(eng));
+    return true;
+  }
+
   function bindStage1() {
     $('pickPdfBtn').addEventListener('click', async () => {
       if (scanPages.some((p) => p.read) && !(await confirmBox('다른 PDF를 고르면 지금 OCR 결과와 묶기가 사라집니다. 계속할까요?'))) return;
@@ -349,40 +388,44 @@
       $('pdfName').textContent = `${r.name} (${r.pages}페이지)`;
       $('pdfName').classList.remove('muted');
       checkPages();
+      refreshMaskPreview();
     });
     $('perStudent').addEventListener('input', () => {
       updateCfg({ pages_per_student: Math.max(1, parseInt($('perStudent').value, 10) || 1) });
       checkPages();
     });
+    document.querySelectorAll('input[name="ocrEngine"]').forEach((r) => {
+      r.addEventListener('change', () => { updateCfg({ ocr_engine: engine() }); showMaskBox(); });
+    });
+    $('maskPct').addEventListener('input', () => { updateCfg({ ocr_mask: maskValue() }); refreshMaskPreview(); });
     $('layoutMode').addEventListener('change', async () => {
-      updateCfg({ layout_mode: $('layoutMode').value });
-      await flushNow();
+      const r = await api.set_layout(null, $('layoutMode').value, null);
+      if (!r.ok) { alertBox(r.error); $('layoutMode').value = cfg.layout_mode || 'auto'; return; }
+      cfg.layout_mode = $('layoutMode').value;
       if (scanPages.length) { scanPages = await api.scan_pages(); renderGroups(); }
+    });
+    $('readSide').addEventListener('change', async () => {
+      const r = await api.set_layout(null, null, $('readSide').value);
+      if (!r.ok) { alertBox(r.error); $('readSide').value = cfg.read_side || 'both'; return; }
+      cfg.read_side = $('readSide').value;
+      if (scanPages.length) { scanPages = await api.scan_pages(); renderGroups(); }
+      if (r.ai_reset) alertBox(`읽을 단이 바뀌어 Qwen이 읽은 ${r.ai_reset}쪽을 지웠습니다(보낸 그림 범위가 달라짐).\n[못 읽은 쪽 다시 읽기]를 누르면 바뀐 단만 잘라 다시 보냅니다.`);
     });
     $('skipGroupCheck').addEventListener('change', () => updateCfg({ skip_group_check: $('skipGroupCheck').checked }));
     $('stage1Toggle').addEventListener('click', () => setStage1Collapsed(!$('stage1Body').hidden));
     $('stage1Btn').addEventListener('click', async () => {
       if (!pdf) { alertBox('먼저 PDF를 선택해 주세요.'); return; }
-      if (scanPages.some((p) => p.read) && !(await confirmBox('처음부터 다시 OCR하면 지금 OCR 결과와 묶기가 사라집니다(CLOVA 호출 비용이 다시 듭니다). 계속할까요?'))) return;
+      if (scanPages.some((p) => p.read) && !(await confirmBox('처음부터 다시 읽으면 지금 OCR 결과와 묶기·검토가 사라집니다(CLOVA·Qwen 비용이 다시 듭니다). 계속할까요?'))) return;
       if (students.length && !(await confirmBox('새로 시작하면 지금 2단계 목록과 변환 결과가 모두 사라집니다. 계속할까요?'))) return;
-      await flushNow();
-      const r = await api.start_ocr(false);
-      if (!r.ok) { setStatus('error', r.error); return; }
       setStatus('', '');
+      if (!(await startOcr(false))) return;
       starts = new Set();
       skipped = new Set();
       scanPages = [];
       $('groupBox').hidden = true;
       pendingRefine = $('skipGroupCheck').checked;
-      setBusy(true);
-      openProgress('ocr');
     });
-    $('rereadBtn').addEventListener('click', async () => {
-      const r = await api.start_ocr(true);
-      if (!r.ok) { alertBox(r.error); return; }
-      setBusy(true);
-      openProgress('ocr');
-    });
+    $('rereadBtn').addEventListener('click', () => startOcr(true));
     $('regroupBtn').addEventListener('click', () => { resetGroups(); renderGroups(); });
     $('refineBtn').addEventListener('click', () => startRefine());
   }
@@ -443,7 +486,8 @@
     if (seq !== groupSeq) return; // 더 새로 그리는 중
     box.innerHTML = '';
     let n = 0;
-    const unread = scanPages.filter((p) => !p.read || p.fail).length;
+    const unread = scanPages.filter(unreadPage).length;
+    const left = scanPages.reduce((n, p) => n + (p.left || 0), 0);
     blocks.forEach((pages) => {
       const kept = pages.filter((p) => !skipped.has(p));
       const info = kept.length ? preview[n++] : null;
@@ -458,12 +502,13 @@
       box.appendChild(el('div', { class: 'gblock' + (info ? '' : ' skipped') }, [head, thumbs]));
     });
     const groups = currentGroups();
-    $('groupSummary').textContent = `${scanPages.length}페이지 → ${groups.length}명` + (skipped.size ? ` (뺀 페이지 ${skipped.size}쪽)` : '') + (unread ? ` - 못 읽은 쪽 ${unread}쪽` : '');
+    $('groupSummary').textContent = `${scanPages.length}페이지 → ${groups.length}명` + (skipped.size ? ` (뺀 페이지 ${skipped.size}쪽)` : '') + (unread ? ` - 못 읽은 쪽 ${unread}쪽` : '') + (left ? ` - 검토할 차이 ${left}곳` : '');
     $('refineBtn').textContent = `정제 시작 (${groups.length}명)`;
     $('rereadBtn').hidden = !unread;
     $('rereadBtn').textContent = `못 읽은 쪽 다시 읽기 (${unread}쪽)`;
   }
 
+  function unreadPage(p) { return !p.read || !!p.fail || !!p.ai_error; }
   function renderThumb(p) {
     const sp = scanPages[p] || {};
     const img = el('img', { class: 'thumb-img', 'data-page': p, alt: `p.${p + 1}` });
@@ -471,8 +516,12 @@
     const isStart = starts.has(p) || p === 0;
     const badges = [];
     if (!sp.read) badges.push(el('span', { class: 'badge danger', text: '읽지 않음' }));
-    else if (sp.fail) badges.push(el('span', { class: 'badge danger', text: '인식 실패' }));
-    else if (!sp.chars) badges.push(el('span', { class: 'badge', text: '글자 없음' }));
+    else if (sp.fail) badges.push(el('span', { class: 'badge danger', title: sp.fail, text: 'CLOVA 실패' }));
+    if (sp.ai_error) badges.push(el('span', { class: 'badge danger', title: sp.ai_error, text: 'Qwen 실패' }));
+    if (sp.read && !sp.fail && !sp.ai_error && !sp.chars) badges.push(el('span', { class: 'badge', text: '글자 없음' }));
+    if (sp.big) badges.push(el('span', { class: 'badge warn' + (sp.left ? '' : ' done'), text: sp.left ? '크게 다름 - 검토' : '검토 끝' }));
+    else if (sp.total) badges.push(el('span', { class: 'badge warn' + (sp.left ? '' : ' done'), text: sp.left ? `검토 남음 ${sp.left}/${sp.total}` : '검토 끝' }));
+    if (sp.own) badges.push(el('span', { class: 'badge', title: '이 쪽만 단 나누기·읽을 단을 따로 정함', text: '따로 설정' }));
     if (sp.cols === 2) badges.push(el('span', { class: 'badge info', text: '2단' }));
     if (sp.warn) badges.push(el('span', { class: 'badge danger', text: '많이 기울어짐 - 다시 스캔 권장' }));
     return el('div', { class: 'thumb' + (skipped.has(p) ? ' is-skipped' : '') }, [
@@ -495,8 +544,10 @@
   async function startRefine(auto) {
     const groups = currentGroups();
     if (!groups.length) { alertBox('정제할 학생이 없습니다.'); return; }
-    const unread = groups.flat().filter((p) => !scanPages[p] || !scanPages[p].read || scanPages[p].fail).length;
-    if (unread && !(await confirmBox(`읽지 못한 쪽이 ${unread}쪽 있습니다. 그 쪽은 빼고 정제할까요?\n([못 읽은 쪽 다시 읽기]로 먼저 읽을 수 있습니다.)`))) return;
+    const unread = groups.flat().filter((p) => !scanPages[p] || unreadPage(scanPages[p])).length;
+    if (unread && !(await confirmBox(`읽지 못한 쪽이 ${unread}쪽 있습니다. 읽은 결과만으로 정제할까요?\n([못 읽은 쪽 다시 읽기]로 먼저 읽을 수 있습니다.)`))) return;
+    const left = groups.flat().reduce((n, p) => n + ((scanPages[p] || {}).left || 0), 0);
+    if (left && !auto && !(await confirmBox(`검토하지 않은 차이가 ${left}곳 있습니다. 그곳은 CLOVA 글로 정제할까요?`))) return;
     if (!auto && students.length && !(await confirmBox('정제하면 지금 2단계 목록과 변환 결과가 모두 사라집니다. 계속할까요?'))) return;
     const r = await api.start_refine(groups);
     if (!r.ok) { alertBox(r.error); return; }
@@ -505,7 +556,7 @@
   }
 
   // ---------- 원본 보기 ----------
-  const viewer = { pages: [], pos: 0, seq: 0 };
+  const viewer = { pages: [], pos: 0, seq: 0, d: null, crops: {} };
   function openViewer(pages, start, title) {
     viewer.pages = pages;
     viewer.pos = Math.max(0, pages.indexOf(start));
@@ -513,46 +564,220 @@
     $('viewer').hidden = false;
     showViewerPage();
   }
+  function curPage() { return viewer.pages[viewer.pos]; }
   async function showViewerPage() {
     const seq = ++viewer.seq;
-    const p = viewer.pages[viewer.pos];
+    const p = curPage();
     $('viewerTitle').textContent = `${viewer.title} - p.${p + 1}`;
     $('viewerPos').textContent = `${viewer.pos + 1} / ${viewer.pages.length}`;
     $('viewerPrev').disabled = viewer.pos === 0;
     $('viewerNext').disabled = viewer.pos >= viewer.pages.length - 1;
     $('viewerImg').removeAttribute('src');
+    $('viewerOverlay').innerHTML = '';
     $('viewerImgMsg').textContent = '그리는 중…';
     $('viewerText').textContent = '';
+    $('viewerReview').innerHTML = '';
+    closeEdit();
     const [img, d] = await Promise.all([api.page_image(p, 1000), api.page_detail(p)]);
     if (seq !== viewer.seq) return;
     if (img.ok) { $('viewerImg').src = img.src; $('viewerImgMsg').textContent = ''; } else $('viewerImgMsg').textContent = img.error;
-    fillViewerText(d);
+    fillViewer(d);
   }
-  function fillViewerText(d) {
-    $('viewerMode').value = d.mode || '';
-    $('viewerMode').disabled = !d.read || busy;
-    if (!d.read) { $('viewerText').textContent = '아직 OCR하지 않은 쪽입니다.'; $('viewerBadge').textContent = ''; $('viewerHint').textContent = ''; return; }
-    if (d.fail) { $('viewerText').textContent = `[인식 실패: ${d.fail}]`; $('viewerBadge').textContent = ''; $('viewerHint').textContent = ''; return; }
-    $('viewerText').textContent = d.text || '(인식된 글자 없음)';
+  // 그림 위에 Qwen에 가린 곳, 단 경계(점선), 빼는 단(회색)을 그린다. 좌표는 CLOVA 그림 기준(w×h), 없으면 비율로.
+  function drawOverlay(d) {
+    const svg = $('viewerOverlay');
+    const W = d.w || 1000;
+    const H = d.h || 1414;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const parts = [];
+    if (d.side && d.side !== 'both') {
+      const cut = d.cut || [W / 2, W / 2];
+      const pts = d.side === 'right' ? `0,0 ${cut[0]},0 ${cut[1]},${H} 0,${H}` : `${cut[0]},0 ${W},0 ${W},${H} ${cut[1]},${H}`;
+      parts.push(`<polygon points="${pts}" class="ov-drop"/>`);
+    }
+    if (d.line) parts.push(`<line x1="${d.line[0]}" y1="${d.line[1]}" x2="${d.line[2]}" y2="${d.line[3]}" class="ov-line"/>`);
+    else if (d.side && d.side !== 'both') {
+      const cut = d.cut || [W / 2, W / 2];
+      parts.push(`<line x1="${cut[0]}" y1="0" x2="${cut[1]}" y2="${H}" class="ov-line"/>`);
+    }
+    if (d.mode !== 'clova' && d.mask > 0) {
+      parts.push(`<rect x="0" y="0" width="${W}" height="${H * d.mask}" class="ov-mask"/>`);
+      parts.push(`<text x="${W / 2}" y="${(H * d.mask) / 2}" class="ov-mask-text" font-size="${Math.max(14, W / 40)}">Qwen에 가린 곳 (${Math.round(d.mask * 100)}%)</text>`);
+    }
+    svg.innerHTML = parts.join('');
+  }
+  function fillViewer(d) {
+    viewer.d = d;
+    drawOverlay(d);
+    $('viewerMode').value = d.cols_own || '';
+    $('viewerSide').value = d.side_own || '';
+    $('viewerMode').disabled = $('viewerSide').disabled = busy;
     $('viewerBadge').textContent = d.cols === 2 ? '2단으로 나눠 읽음' : '한 단으로 읽음';
-    $('viewerHint').textContent = d.warn ? `스캔이 약 ${Math.abs(d.deg)}도 기울어 바로잡지 못했습니다. 다시 스캔하면 더 정확합니다.` :
-      'OCR 원문입니다(정제 전). 학번·이름 줄은 정제할 때 프로그램이 지웁니다.';
+    const hints = [];
+    if (d.warn) hints.push(`스캔이 약 ${Math.abs(d.deg)}도 기울어 바로잡지 못했습니다. 다시 스캔하면 더 정확합니다.`);
+    if (d.clova_fail) hints.push(`CLOVA가 이 쪽을 읽지 못했습니다: ${d.clova_fail}`);
+    if (d.ai_error) hints.push(`Qwen이 이 쪽을 읽지 못했습니다: ${d.ai_error}`);
+    if (d.mode !== 'clova' && d.ai_read === false) hints.push('Qwen이 아직 읽지 않은 쪽입니다. [못 읽은 쪽 다시 읽기]로 읽습니다.');
+    $('viewerHint').textContent = hints.join(' ');
+    renderReview(d);
+    $('viewerFigsWrap').hidden = !(d.figures && d.figures.length);
+    $('viewerFigs').checked = d.figs !== false;
+    $('viewerText').textContent = d.text || (d.read ? '(인식된 글자 없음)' : '아직 OCR하지 않은 쪽입니다.');
+    $('viewerFinalNote').textContent = d.edited ? '직접 고친 글' : d.cmp ? (d.cmp.big ? '' : '고르지 않은 곳은 CLOVA 글') : '학번·이름 줄은 정제할 때 프로그램이 지웁니다';
+    $('viewerEditClear').hidden = !d.edited;
   }
+  async function decide(data) {
+    const d = await api.decide(curPage(), data);
+    if (d.ok === false) { alertBox(d.error); return; }
+    fillViewer(d);
+    refreshSummaries();
+  }
+  const refreshSummaries = debounce(async () => {
+    if ($('groupBox').hidden) return;
+    scanPages = await api.scan_pages();
+    renderGroups();
+  }, 300);
+
+  // 한 줄 입력 창(차이 직접 고치기)
+  function promptBox(message, value) {
+    return new Promise((resolve) => {
+      $('modalMsg').textContent = '';
+      const ta = el('textarea', { rows: 3, class: 'prompt-input' });
+      ta.value = value || '';
+      $('modalMsg').append(el('div', { text: message }), ta);
+      $('modalCancel').hidden = false;
+      $('modal').hidden = false;
+      setTimeout(() => ta.focus(), 30);
+      const done = (v) => {
+        $('modal').hidden = true;
+        $('modalOk').onclick = $('modalCancel').onclick = null;
+        resolve(v);
+      };
+      $('modalOk').onclick = () => done(ta.value);
+      $('modalCancel').onclick = () => done(null);
+    });
+  }
+
+  function renderReview(d) {
+    const box = $('viewerReview');
+    box.innerHTML = '';
+    if (!d.cmp) return;
+    const rv = d.review || {};
+    const dec = rv.d || {};
+    const sugg = rv.s || {};
+    const diffs = d.cmp.diffs.filter((x) => x.kind === 'text');
+    if (d.cmp.big) {
+      const pick = rv.page;
+      box.appendChild(el('div', { class: 'review' }, [
+        el('div', { class: 'review-head' }, [
+          el('b', { text: '두 결과가 크게 다릅니다' }),
+          el('span', { class: 'muted small', text: `(비슷한 정도 ${Math.round(d.cmp.ratio * 100)}%) 쪽 전체로 고르세요. 고르지 않으면 CLOVA 글을 씁니다.` }),
+        ]),
+        el('div', { class: 'two-col big-pick' }, [['clova', 'CLOVA', d.clova], ['ai', 'Qwen', d.ai]].map(([k, label, text]) => el('div', { class: 'big-col' + (pick === k ? ' picked' : '') }, [
+          el('div', { class: 'big-col-head' }, [
+            el('b', { text: label }),
+            el('button', { type: 'button', class: 'mini' + (pick === k ? ' on' : ''), text: pick === k ? '이 글을 씀' : '이 글 쓰기', onclick: () => decide({ page: pick === k ? null : k }) }),
+          ]),
+          el('pre', { text: text || '' }),
+        ]))),
+      ]));
+      return;
+    }
+    const left = d.unreviewed;
+    const hasSugg = Object.keys(sugg).length > 0;
+    box.appendChild(el('div', { class: 'review-head' }, [
+      el('b', { text: diffs.length ? `다르게 읽은 곳 ${diffs.length}곳` : '두 결과가 같습니다' }),
+      diffs.length ? el('span', { class: 'badge warn' + (left ? '' : ' done'), text: left ? `남은 ${left}곳` : '검토 끝' }) : null,
+      el('span', { class: 'spacer' }),
+      diffs.length ? el('button', { type: 'button', class: 'mini', text: '모두 CLOVA', onclick: () => decide({ all: 'clova' }) }) : null,
+      diffs.length ? el('button', { type: 'button', class: 'mini', text: '모두 Qwen', onclick: () => decide({ all: 'ai' }) }) : null,
+      diffs.length ? el('button', { type: 'button', class: 'mini', text: 'AI 제안', title: '그림 없이 다른 곳의 글자와 앞뒤 문맥만 보냅니다(학번·이름은 ○로 지움).', onclick: (e) => suggest(e.currentTarget) }) : null,
+      hasSugg ? el('button', { type: 'button', class: 'mini', text: '제안 모두 받기', onclick: () => decide({ accept_suggest: true }) }) : null,
+      diffs.length ? el('button', { type: 'button', class: 'mini', text: '고른 것 지우기', onclick: () => decide({ reset: true }) }) : null,
+    ]));
+    const list = el('div', { class: 'diff-list' });
+    diffs.forEach((x) => {
+      const c = dec[x.id] || {};
+      const sg = sugg[x.id];
+      const img = el('img', { class: 'diff-crop', alt: '원본 그 줄' });
+      if (x.box) loadCrop(img, curPage(), x, d);
+      const btn = (k, label, text) => el('button', {
+        type: 'button', class: 'pick' + (c.pick === k ? ' on' : ''),
+        onclick: () => decide({ d: { [x.id]: c.pick === k ? null : { pick: k } } }),
+      }, [el('small', { text: label }), el('span', { text: (text || '').replace(/\n/g, ' ') || '(없음)' })]);
+      const edit = el('button', {
+        type: 'button', class: 'pick' + (c.pick === 'edit' ? ' on' : ''),
+        onclick: async () => {
+          const t = await promptBox('이 부분을 직접 고칩니다. 비우면 이 부분을 지웁니다.', c.pick === 'edit' ? c.text : x.clova);
+          if (t !== null) decide({ d: { [x.id]: { pick: 'edit', text: t } } });
+        },
+      }, [el('small', { text: '고치기' }), el('span', { text: c.pick === 'edit' ? (c.text || '(지움)') : '…' })]);
+      const sgText = sg ? `AI 제안: ${sg.pick === 'ai' ? 'Qwen' : sg.pick === 'clova' ? 'CLOVA' : `섞기 "${sg.text}"`}${sg.reason ? ` - ${sg.reason}` : ''}${sg.new ? ' (두 결과에 없는 글자를 만듦, 확인 필요)' : ''}` : '';
+      list.appendChild(el('div', { class: 'diff' + (c.pick ? ' decided' : '') }, [
+        x.box ? img : null,
+        el('div', { class: 'diff-ctx' }, [
+          el('span', { class: 'muted', text: '…' + x.before }),
+          el('mark', { text: (x.clova || '').replace(/\n/g, ' ') || '∅' }),
+          el('span', { class: 'muted', text: x.after + '…' }),
+        ]),
+        el('div', { class: 'diff-btns' }, [btn('clova', 'CLOVA', x.clova), btn('ai', 'Qwen', x.ai), edit]),
+        sg ? el('div', { class: 'diff-sugg' + (sg.new ? ' new' : ''), text: sgText }) : null,
+      ]));
+    });
+    box.appendChild(list);
+  }
+  async function loadCrop(img, page, x, d) {
+    const key = `${page}:${x.box.join(',')}`;
+    const r = viewer.crops[key] || await api.diff_crop(page, x.box, d.w, d.h, x.clip);
+    if (r.ok) { viewer.crops[key] = r; img.src = r.src; } else img.alt = r.error;
+  }
+  async function suggest(btn) {
+    btn.disabled = true;
+    btn.textContent = '제안 받는 중…';
+    const d = await api.suggest(curPage());
+    if (d.ok === false) { alertBox(d.error); btn.disabled = false; btn.textContent = 'AI 제안'; return; }
+    if (d.suggest_cost) setCredits(d.suggest_cost, undefined);
+    fillViewer(d);
+  }
+  function closeEdit() { $('viewerEdit').hidden = true; $('viewerText').hidden = false; $('viewerEditBtn').hidden = false; }
   function bindViewer() {
     $('viewerClose').addEventListener('click', () => { $('viewer').hidden = true; });
     $('viewerPrev').addEventListener('click', () => { viewer.pos--; showViewerPage(); });
     $('viewerNext').addEventListener('click', () => { viewer.pos++; showViewerPage(); });
     document.addEventListener('keydown', (e) => {
-      if ($('viewer').hidden) return;
+      if ($('viewer').hidden || !$('modal').hidden) return;
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
       if (e.key === 'Escape') $('viewer').hidden = true;
-      else if (e.key === 'ArrowLeft' && !$('viewerPrev').disabled && e.target.tagName !== 'SELECT') $('viewerPrev').click();
-      else if (e.key === 'ArrowRight' && !$('viewerNext').disabled && e.target.tagName !== 'SELECT') $('viewerNext').click();
+      else if (e.key === 'ArrowLeft' && !$('viewerPrev').disabled) $('viewerPrev').click();
+      else if (e.key === 'ArrowRight' && !$('viewerNext').disabled) $('viewerNext').click();
     });
     $('viewerMode').addEventListener('change', async () => {
-      const p = viewer.pages[viewer.pos];
-      const d = await api.set_page_mode(p, $('viewerMode').value);
-      fillViewerText(d);
-      if (!$('groupBox').hidden) { scanPages = await api.scan_pages(); renderGroups(); }
+      const r = await api.set_layout(curPage(), $('viewerMode').value, null);
+      if (!r.ok) { alertBox(r.error); return; }
+      fillViewer(r.detail);
+      refreshSummaries();
+    });
+    $('viewerSide').addEventListener('change', async () => {
+      const r = await api.set_layout(curPage(), null, $('viewerSide').value);
+      if (!r.ok) { alertBox(r.error); return; }
+      fillViewer(r.detail);
+      refreshSummaries();
+      if (r.ai_reset) alertBox('읽을 단이 바뀌어 이 쪽의 Qwen 결과를 지웠습니다. [못 읽은 쪽 다시 읽기]로 바뀐 단만 다시 보냅니다.');
+    });
+    $('viewerFigs').addEventListener('change', () => decide({ figs: $('viewerFigs').checked }));
+    $('viewerEditBtn').addEventListener('click', () => {
+      $('viewerEditText').value = viewer.d ? viewer.d.text : '';
+      $('viewerEdit').hidden = false;
+      $('viewerText').hidden = true;
+      $('viewerEditBtn').hidden = true;
+      $('viewerEditText').focus();
+    });
+    $('viewerEditCancel').addEventListener('click', closeEdit);
+    $('viewerEditSave').addEventListener('click', async () => { await decide({ page: 'edit', text: $('viewerEditText').value }); closeEdit(); });
+    $('viewerEditClear').addEventListener('click', async () => {
+      if (!(await confirmBox('직접 고친 글을 지우고 OCR 결과(고른 것)로 되돌릴까요?'))) return;
+      await decide({ page: null });
+      closeEdit();
     });
   }
 
@@ -788,7 +1013,9 @@
       case 'ocr_done': {
         closeProgress();
         showGroups(ev.pages);
-        const unread = ev.pages.filter((p) => !p.read || p.fail).length;
+        if (ev.cost) setCredits(ev.cost, ev.balance ?? undefined);
+        if (ev.ai_message) alertBox('Qwen으로 읽기를 멈췄습니다: ' + ev.ai_message);
+        const unread = ev.pages.filter(unreadPage).length;
         if (ev.stopped || unread) pendingRefine = false;
         if (ev.stopped) setStatus('error', `OCR을 중지했습니다. 읽은 쪽은 남아 있습니다(못 읽은 쪽 ${unread}쪽).`);
         else if (unread) setStatus('error', `${unread}쪽을 읽지 못했습니다. [못 읽은 쪽 다시 읽기]를 눌러 주세요.`);
