@@ -20,6 +20,8 @@ DEFAULTS = {
     "active_tab": 0,
     "target_bytes": 1500,
     "pages_per_student": 1,
+    "layout_mode": "auto",  # 2단 나누기: auto(자동) / off(나누지 않음) / two(2단으로)
+    "skip_group_check": False,  # OCR 뒤 묶기 확인 없이 바로 정제
 }
 
 _lock = threading.Lock()
@@ -45,6 +47,8 @@ def load() -> dict:
         cfg["refine_prompts"] = DEFAULT_REFINE_PROMPTS
     if cfg.get("refine_mode") not in ("A", "B"):
         cfg["refine_mode"] = "B"
+    if cfg.get("layout_mode") not in ("auto", "off", "two"):
+        cfg["layout_mode"] = "auto"
     if not isinstance(cfg.get("active_tab"), int) or not 0 <= cfg["active_tab"] < 5:
         cfg["active_tab"] = 0
     return cfg

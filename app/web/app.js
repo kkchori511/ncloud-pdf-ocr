@@ -8,6 +8,12 @@
   let students = [];
   let sortMode = 'scan';
   let busy = false;
+  // 스캔 묶기: 쪽 요약, 새 학생이 시작되는 쪽, 뺄 쪽
+  let scanPages = [];
+  let starts = new Set();
+  let skipped = new Set();
+  let pendingRefine = false;
+  let appInfo = {};
 
   // ---------- 유틸 ----------
   function isHangul(c) {
@@ -50,6 +56,7 @@
       $('modal').hidden = false;
       const done = (v) => {
         $('modal').hidden = true;
+        $('modal').classList.remove('wide');
         $('modalOk').onclick = $('modalCancel').onclick = null;
         resolve(v);
       };
@@ -62,14 +69,14 @@
 
   // ---------- 진행 창 ----------
   const JOBS = {
-    stage1: {
-      title: '1단계 진행 중',
+    ocr: {
+      title: '1단계 OCR 중',
       steps: [
         { key: 'split', label: 'PDF 분할' },
         { key: 'ocr', label: 'OCR', unit: '구간' },
-        { key: 'refine', label: '정제', unit: '명' },
       ],
     },
+    refine: { title: '1단계 정제 중', steps: [{ key: 'refine', label: '정제', unit: '명' }] },
     transform: { title: '2단계 변환 중', steps: [{ key: 'transform', label: '변환', unit: '명' }] },
   };
   let progTimer = null;
@@ -133,7 +140,7 @@
   }
   function setBusy(v) {
     busy = v;
-    ['stage1Btn', 'transformBtn', 'pickPdfBtn'].forEach((id) => { $(id).disabled = v; });
+    ['stage1Btn', 'transformBtn', 'pickPdfBtn', 'refineBtn', 'rereadBtn', 'regroupBtn'].forEach((id) => { $(id).disabled = v; });
     document.querySelectorAll('.rerun').forEach((b) => { b.disabled = v; });
   }
   function setCredits(cost, balance) {
@@ -179,6 +186,8 @@
     $('refineB').value = (cfg.refine_prompts || {}).B || '';
     document.querySelectorAll('input[name="refineMode"]').forEach((r) => { r.checked = r.value === cfg.refine_mode; });
     $('perStudent').value = cfg.pages_per_student || 1;
+    $('layoutMode').value = cfg.layout_mode || 'auto';
+    $('skipGroupCheck').checked = !!cfg.skip_group_check;
     $('targetBytes').value = cfg.target_bytes ?? 1500;
     document.querySelectorAll('.model-row').forEach((row) => showPrice(row));
     renderPromptTabs();
@@ -329,10 +338,14 @@
   }
   function bindStage1() {
     $('pickPdfBtn').addEventListener('click', async () => {
+      if (scanPages.some((p) => p.read) && !(await confirmBox('다른 PDF를 고르면 지금 OCR 결과와 묶기가 사라집니다. 계속할까요?'))) return;
       const r = await api.pick_pdf();
       if (r.error) { alertBox(r.error); return; }
       if (!r.ok) return;
       pdf = r;
+      scanPages = [];
+      thumbCache = {};
+      $('groupBox').hidden = true;
       $('pdfName').textContent = `${r.name} (${r.pages}페이지)`;
       $('pdfName').classList.remove('muted');
       checkPages();
@@ -341,16 +354,205 @@
       updateCfg({ pages_per_student: Math.max(1, parseInt($('perStudent').value, 10) || 1) });
       checkPages();
     });
+    $('layoutMode').addEventListener('change', async () => {
+      updateCfg({ layout_mode: $('layoutMode').value });
+      await flushNow();
+      if (scanPages.length) { scanPages = await api.scan_pages(); renderGroups(); }
+    });
+    $('skipGroupCheck').addEventListener('change', () => updateCfg({ skip_group_check: $('skipGroupCheck').checked }));
     $('stage1Toggle').addEventListener('click', () => setStage1Collapsed(!$('stage1Body').hidden));
     $('stage1Btn').addEventListener('click', async () => {
       if (!pdf) { alertBox('먼저 PDF를 선택해 주세요.'); return; }
+      if (scanPages.some((p) => p.read) && !(await confirmBox('처음부터 다시 OCR하면 지금 OCR 결과와 묶기가 사라집니다(CLOVA 호출 비용이 다시 듭니다). 계속할까요?'))) return;
       if (students.length && !(await confirmBox('새로 시작하면 지금 2단계 목록과 변환 결과가 모두 사라집니다. 계속할까요?'))) return;
-      const per = Math.max(1, parseInt($('perStudent').value, 10) || 1);
-      const r = await api.start_stage1(pdf.path, per);
+      await flushNow();
+      const r = await api.start_ocr(false);
       if (!r.ok) { setStatus('error', r.error); return; }
       setStatus('', '');
+      starts = new Set();
+      skipped = new Set();
+      scanPages = [];
+      $('groupBox').hidden = true;
+      pendingRefine = $('skipGroupCheck').checked;
       setBusy(true);
-      openProgress('stage1');
+      openProgress('ocr');
+    });
+    $('rereadBtn').addEventListener('click', async () => {
+      const r = await api.start_ocr(true);
+      if (!r.ok) { alertBox(r.error); return; }
+      setBusy(true);
+      openProgress('ocr');
+    });
+    $('regroupBtn').addEventListener('click', () => { resetGroups(); renderGroups(); });
+    $('refineBtn').addEventListener('click', () => startRefine());
+  }
+
+  async function flushNow() {
+    if (Object.keys(pending).length) { const p = pending; pending = {}; await api.save_config(p); }
+  }
+
+  // ---------- 1단계: 묶기 확인 ----------
+  function perStudent() { return Math.max(1, parseInt($('perStudent').value, 10) || 1); }
+  function resetGroups() {
+    const per = perStudent();
+    starts = new Set();
+    for (let i = 0; i < scanPages.length; i += per) starts.add(i);
+    skipped = new Set();
+  }
+  // app/scan.py groups_from_starts와 같은 규칙
+  function currentGroups() {
+    const groups = [];
+    let cur = [];
+    for (let p = 0; p < scanPages.length; p++) {
+      if ((starts.has(p) || p === 0) && cur.length) { groups.push(cur); cur = []; }
+      if (!skipped.has(p)) cur.push(p);
+    }
+    if (cur.length) groups.push(cur);
+    return groups;
+  }
+  // 그룹 칸: 빠진 쪽도 자리를 보이게, 새 학생 시작 기준으로 쪽을 나눈다
+  function pageBlocks() {
+    const blocks = [];
+    let cur = [];
+    for (let p = 0; p < scanPages.length; p++) {
+      if ((starts.has(p) || p === 0) && cur.length) { blocks.push(cur); cur = []; }
+      cur.push(p);
+    }
+    if (cur.length) blocks.push(cur);
+    return blocks;
+  }
+
+  let thumbCache = {};
+  const thumbObserver = new IntersectionObserver((entries) => {
+    entries.forEach(async (e) => {
+      if (!e.isIntersecting) return;
+      const img = e.target;
+      thumbObserver.unobserve(img);
+      const page = +img.dataset.page;
+      const r = thumbCache[page] || await api.page_image(page, 240);
+      if (r.ok) { thumbCache[page] = r; img.src = r.src; } else img.alt = r.error;
+    });
+  }, { rootMargin: '300px' });
+
+  let groupSeq = 0;
+  async function renderGroups() {
+    const seq = ++groupSeq;
+    const box = $('groupList');
+    const blocks = pageBlocks();
+    const preview = await api.preview_groups(blocks.map((b) => b.filter((p) => !skipped.has(p))).filter((g) => g.length));
+    if (seq !== groupSeq) return; // 더 새로 그리는 중
+    box.innerHTML = '';
+    let n = 0;
+    const unread = scanPages.filter((p) => !p.read || p.fail).length;
+    blocks.forEach((pages) => {
+      const kept = pages.filter((p) => !skipped.has(p));
+      const info = kept.length ? preview[n++] : null;
+      const label = info ? `${n}번째 학생` : '빠진 페이지';
+      const idText = info ? [info.student_id ? `학번 ${info.student_id}` : null, info.name ? `이름 ${info.name}` : null].filter(Boolean).join(' · ') : '';
+      const head = el('div', { class: 'gblock-head' }, [
+        el('b', { text: label }),
+        info ? el('span', { class: 'gids' + (info.student_id && info.name ? '' : ' missing'), text: idText || '학번·이름 못 찾음 (정제 때 AI가 찾음)' }) : null,
+        info && idText && !(info.student_id && info.name) ? el('span', { class: 'muted small', text: '나머지는 정제 때 AI가 찾음' }) : null,
+      ]);
+      const thumbs = el('div', { class: 'thumbs' }, pages.map((p) => renderThumb(p)));
+      box.appendChild(el('div', { class: 'gblock' + (info ? '' : ' skipped') }, [head, thumbs]));
+    });
+    const groups = currentGroups();
+    $('groupSummary').textContent = `${scanPages.length}페이지 → ${groups.length}명` + (skipped.size ? ` (뺀 페이지 ${skipped.size}쪽)` : '') + (unread ? ` - 못 읽은 쪽 ${unread}쪽` : '');
+    $('refineBtn').textContent = `정제 시작 (${groups.length}명)`;
+    $('rereadBtn').hidden = !unread;
+    $('rereadBtn').textContent = `못 읽은 쪽 다시 읽기 (${unread}쪽)`;
+  }
+
+  function renderThumb(p) {
+    const sp = scanPages[p] || {};
+    const img = el('img', { class: 'thumb-img', 'data-page': p, alt: `p.${p + 1}` });
+    thumbObserver.observe(img);
+    const isStart = starts.has(p) || p === 0;
+    const badges = [];
+    if (!sp.read) badges.push(el('span', { class: 'badge danger', text: '읽지 않음' }));
+    else if (sp.fail) badges.push(el('span', { class: 'badge danger', text: '인식 실패' }));
+    else if (!sp.chars) badges.push(el('span', { class: 'badge', text: '글자 없음' }));
+    if (sp.cols === 2) badges.push(el('span', { class: 'badge info', text: '2단' }));
+    if (sp.warn) badges.push(el('span', { class: 'badge danger', text: '많이 기울어짐 - 다시 스캔 권장' }));
+    return el('div', { class: 'thumb' + (skipped.has(p) ? ' is-skipped' : '') }, [
+      el('button', { type: 'button', class: 'thumb-view', title: '원본과 OCR 글자 보기', onclick: () => openViewer(scanPages.map((x) => x.index), p, '원본 보기') }, [img]),
+      el('div', { class: 'thumb-meta' }, [el('b', { text: `p.${p + 1}` }), ...badges]),
+      el('div', { class: 'thumb-btns' }, [
+        el('button', {
+          type: 'button', class: 'mini' + (isStart && p !== 0 ? ' on' : ''), text: '새 학생', disabled: p === 0,
+          title: p === 0 ? '첫 페이지는 늘 첫 학생입니다' : '이 페이지부터 다음 학생',
+          onclick: () => { if (starts.has(p)) starts.delete(p); else starts.add(p); renderGroups(); },
+        }),
+        el('button', {
+          type: 'button', class: 'mini' + (skipped.has(p) ? ' on' : ''), text: skipped.has(p) ? '빼기 취소' : '빼기',
+          onclick: () => { if (skipped.has(p)) skipped.delete(p); else skipped.add(p); renderGroups(); },
+        }),
+      ]),
+    ]);
+  }
+
+  async function startRefine(auto) {
+    const groups = currentGroups();
+    if (!groups.length) { alertBox('정제할 학생이 없습니다.'); return; }
+    const unread = groups.flat().filter((p) => !scanPages[p] || !scanPages[p].read || scanPages[p].fail).length;
+    if (unread && !(await confirmBox(`읽지 못한 쪽이 ${unread}쪽 있습니다. 그 쪽은 빼고 정제할까요?\n([못 읽은 쪽 다시 읽기]로 먼저 읽을 수 있습니다.)`))) return;
+    if (!auto && students.length && !(await confirmBox('정제하면 지금 2단계 목록과 변환 결과가 모두 사라집니다. 계속할까요?'))) return;
+    const r = await api.start_refine(groups);
+    if (!r.ok) { alertBox(r.error); return; }
+    setBusy(true);
+    openProgress('refine');
+  }
+
+  // ---------- 원본 보기 ----------
+  const viewer = { pages: [], pos: 0, seq: 0 };
+  function openViewer(pages, start, title) {
+    viewer.pages = pages;
+    viewer.pos = Math.max(0, pages.indexOf(start));
+    viewer.title = title;
+    $('viewer').hidden = false;
+    showViewerPage();
+  }
+  async function showViewerPage() {
+    const seq = ++viewer.seq;
+    const p = viewer.pages[viewer.pos];
+    $('viewerTitle').textContent = `${viewer.title} - p.${p + 1}`;
+    $('viewerPos').textContent = `${viewer.pos + 1} / ${viewer.pages.length}`;
+    $('viewerPrev').disabled = viewer.pos === 0;
+    $('viewerNext').disabled = viewer.pos >= viewer.pages.length - 1;
+    $('viewerImg').removeAttribute('src');
+    $('viewerImgMsg').textContent = '그리는 중…';
+    $('viewerText').textContent = '';
+    const [img, d] = await Promise.all([api.page_image(p, 1000), api.page_detail(p)]);
+    if (seq !== viewer.seq) return;
+    if (img.ok) { $('viewerImg').src = img.src; $('viewerImgMsg').textContent = ''; } else $('viewerImgMsg').textContent = img.error;
+    fillViewerText(d);
+  }
+  function fillViewerText(d) {
+    $('viewerMode').value = d.mode || '';
+    $('viewerMode').disabled = !d.read || busy;
+    if (!d.read) { $('viewerText').textContent = '아직 OCR하지 않은 쪽입니다.'; $('viewerBadge').textContent = ''; $('viewerHint').textContent = ''; return; }
+    if (d.fail) { $('viewerText').textContent = `[인식 실패: ${d.fail}]`; $('viewerBadge').textContent = ''; $('viewerHint').textContent = ''; return; }
+    $('viewerText').textContent = d.text || '(인식된 글자 없음)';
+    $('viewerBadge').textContent = d.cols === 2 ? '2단으로 나눠 읽음' : '한 단으로 읽음';
+    $('viewerHint').textContent = d.warn ? `스캔이 약 ${Math.abs(d.deg)}도 기울어 바로잡지 못했습니다. 다시 스캔하면 더 정확합니다.` :
+      'OCR 원문입니다(정제 전). 학번·이름 줄은 정제할 때 프로그램이 지웁니다.';
+  }
+  function bindViewer() {
+    $('viewerClose').addEventListener('click', () => { $('viewer').hidden = true; });
+    $('viewerPrev').addEventListener('click', () => { viewer.pos--; showViewerPage(); });
+    $('viewerNext').addEventListener('click', () => { viewer.pos++; showViewerPage(); });
+    document.addEventListener('keydown', (e) => {
+      if ($('viewer').hidden) return;
+      if (e.key === 'Escape') $('viewer').hidden = true;
+      else if (e.key === 'ArrowLeft' && !$('viewerPrev').disabled && e.target.tagName !== 'SELECT') $('viewerPrev').click();
+      else if (e.key === 'ArrowRight' && !$('viewerNext').disabled && e.target.tagName !== 'SELECT') $('viewerNext').click();
+    });
+    $('viewerMode').addEventListener('change', async () => {
+      const p = viewer.pages[viewer.pos];
+      const d = await api.set_page_mode(p, $('viewerMode').value);
+      fillViewerText(d);
+      if (!$('groupBox').hidden) { scanPages = await api.scan_pages(); renderGroups(); }
     });
   }
 
@@ -421,7 +623,10 @@
       el('label', { class: 'field-inline' }, ['학번', sid]),
       el('label', { class: 'field-inline' }, ['이름', name]),
       s.picked !== null ? el('span', { class: 'picked-badge', text: `${s.picked + 1}안 선택됨` }) : null,
+      s.id_by === 'ai' && (s.student_id || s.name) ? el('span', { class: 'badge', title: '머리글에서 규칙으로 찾지 못해 AI가 찾은 값입니다. 확인해 주세요.', text: 'AI가 찾음' }) : null,
+      s.page_list && s.page_list.length ? el('button', { type: 'button', class: 'mini', text: '원본 보기', onclick: () => openViewer(s.page_list, s.page_list[0], `${no}번째 학생 원본`) }) : null,
       s.error ? el('span', { class: 'err', text: '정제 실패: ' + s.error }) : null,
+      s.warn ? el('span', { class: 'err', text: s.warn }) : null,
       s.rerr ? el('span', { class: 'err', text: '변환 실패: ' + s.rerr }) : null,
       el('button', {
         type: 'button', class: 'rerun',
@@ -570,7 +775,9 @@
         break;
       case 'error':
         closeProgress();
+        pendingRefine = false;
         setStatus('error', '오류: ' + ev.message);
+        if (pdf) api.scan_pages().then((pages) => { if (pages.some((p) => p.read)) showGroups(pages); });
         students.forEach((s) => { if (s.busy) { s.busy = false; rerenderCard(s); } });
         alertBox('오류: ' + ev.message);
         break;
@@ -578,6 +785,16 @@
         closeProgress();
         setStatus('error', '중지했습니다.');
         break;
+      case 'ocr_done': {
+        closeProgress();
+        showGroups(ev.pages);
+        const unread = ev.pages.filter((p) => !p.read || p.fail).length;
+        if (ev.stopped || unread) pendingRefine = false;
+        if (ev.stopped) setStatus('error', `OCR을 중지했습니다. 읽은 쪽은 남아 있습니다(못 읽은 쪽 ${unread}쪽).`);
+        else if (unread) setStatus('error', `${unread}쪽을 읽지 못했습니다. [못 읽은 쪽 다시 읽기]를 눌러 주세요.`);
+        else setStatus('info', pendingRefine ? 'OCR 완료 - 바로 정제합니다.' : 'OCR 완료 - 아래에서 학생별 묶기를 확인한 뒤 [정제 시작]을 누르세요.');
+        break;
+      }
       case 'stage1_done': {
         closeProgress();
         students = ev.students.map((s) => Object.assign(s, { results: [null, null], picked: null, checked: true, busy: false, rerr: '' }));
@@ -590,6 +807,8 @@
         if (failed) msg += ` - 정제 실패 ${failed}명(OCR 원문을 그대로 넣었습니다)`;
         if (missing) msg += ` - 학번/이름 확인 필요 ${missing}명(노란 칸)`;
         if (ev.stopped) msg = '중지됨 - ' + msg;
+        const aiIds = students.filter((s) => s.id_by === 'ai' && (s.student_id || s.name)).length;
+        if (aiIds) msg += ` - AI가 찾은 학번/이름 ${aiIds}명`;
         $('stage1Summary').textContent = msg;
         $('stage1Toggle').hidden = false;
         setStatus(failed || ev.stopped ? 'error' : 'info', msg);
@@ -608,6 +827,25 @@
         break;
       case 'idle':
         setBusy(false);
+        if (pendingRefine) { pendingRefine = false; startRefine(true); }
+        break;
+      case 'update_available':
+        showUpdate(ev);
+        break;
+      case 'update_none':
+        appInfo.update = ev.error ? `업데이트 확인 실패: ${ev.error}` : '최신 버전입니다.';
+        break;
+      case 'update_progress':
+        $('updateText').textContent = `새 버전 내려받는 중… ${Math.round((ev.done / ev.total) * 100)}%`;
+        break;
+      case 'update_ready':
+        updateReady(ev.version);
+        break;
+      case 'update_error':
+        $('updateText').textContent = `업데이트 실패: ${ev.message}`;
+        $('updateNowBtn').disabled = false;
+        $('updateNowBtn').textContent = '내려받기 페이지';
+        updateInfo.can_apply = false;
         break;
     }
   };
@@ -618,7 +856,17 @@
       b.addEventListener('click', () => showPanel(b.dataset.panel));
     });
     $('brandBox').addEventListener('click', () => {
-      modal('자유롭게 배포 가능하지만 반드시 <b class="danger-text">키 초기화</b>하고 배포하세요.<br><span class="muted">설정 &gt; 연결 정보 맨 아래에 [키 초기화] 버튼이 있습니다.</span>', false, true);
+      const url = appInfo.pages_url || '';
+      $('modal').classList.add('wide');
+      modal(`<div class="about"><img src="face.png" alt="" class="about-face">` +
+        `<div class="about-name">${appInfo.name || '악필교정기'} <span>v${appInfo.version || ''}</span></div>` +
+        `<div class="about-tag">${appInfo.tagline || ''}</div>` +
+        `<div class="about-maker">Made by 김한량 디지털 공방</div>` +
+        `<div class="about-update muted">${appInfo.update || '업데이트 확인 중…'}</div></div>` +
+        `<div class="about-share"><b>다른 사람에게 줄 때</b><br>` +
+        `내려받기 페이지 주소를 알려 주세요: <a href="${url}">${url.replace(/^https:\/\//, '').replace(/\/$/, '')}</a><br>` +
+        `파일을 직접 줄 때는 <b class="danger-text">exe 파일만</b> 전달하세요. 키는 exe 옆 <code>악필교정기_설정.json</code>에 평문으로 저장되어, 폴더째 주면 내 키도 함께 넘어갑니다.<br>` +
+        `<span class="muted">공용 PC라면 설정 &gt; 연결 정보 맨 아래 [키 초기화]로 키를 지우세요.</span></div>`, false, true);
     });
     $('stopBtn').addEventListener('click', async () => {
       $('stopBtn').disabled = true;
@@ -648,9 +896,55 @@
     show('signup');
   }
 
+  // ---------- 업데이트 ----------
+  let updateInfo = null;
+  function showUpdate(ev) {
+    updateInfo = ev;
+    appInfo.update = `새 버전 v${ev.version}이(가) 있습니다.`;
+    $('updateText').textContent = `새 버전 v${ev.version}이(가) 있습니다.`;
+    $('updateNowBtn').textContent = ev.can_apply ? '지금 업데이트' : '내려받기 페이지';
+    $('updateBar').hidden = false;
+  }
+  function updateReady(version) {
+    $('updateText').textContent = `v${version}로 바꿔 두었습니다. [다시 시작]을 누르면 새 버전으로 켜집니다.`;
+    $('updateNotesBtn').hidden = true;
+    $('updateNowBtn').disabled = false;
+    $('updateNowBtn').textContent = '다시 시작';
+    $('updateLaterBtn').textContent = '나중에(다음에 켤 때 적용)';
+    updateInfo.ready = true;
+  }
+  function bindUpdate() {
+    $('updateLaterBtn').addEventListener('click', () => { $('updateBar').hidden = true; });
+    $('updateNotesBtn').addEventListener('click', () => alertBox(`v${updateInfo.version} 바뀐 내용\n\n${updateInfo.notes || '(내용 없음)'}`));
+    $('updateNowBtn').addEventListener('click', async () => {
+      if (!updateInfo) return;
+      if (updateInfo.ready) {
+        if (busy && !(await confirmBox('작업이 진행 중입니다. 지금 다시 시작하면 진행 중인 작업과 화면의 결과가 사라집니다. 계속할까요?'))) return;
+        if (!busy && students.length && !(await confirmBox('다시 시작하면 화면의 학생 목록과 변환 결과가 사라집니다. 먼저 [xlsx 저장]을 하셨나요?\n계속할까요?'))) return;
+        const r = await api.update_restart();
+        if (!r.ok) alertBox(r.error);
+        return;
+      }
+      if (!updateInfo.can_apply) { api.open_url(appInfo.pages_url); return; }
+      const r = await api.update_apply();
+      if (!r.ok) { alertBox(r.error); return; }
+      $('updateNowBtn').disabled = true;
+      $('updateText').textContent = '새 버전 내려받는 중…';
+    });
+  }
+
+  function showGroups(pages) {
+    const first = !scanPages.length;
+    scanPages = pages;
+    if (first || starts.size === 0) resetGroups();
+    $('groupBox').hidden = false;
+    renderGroups();
+  }
+
   async function init() {
     api = window.pywebview.api;
     const info = await api.app_info();
+    appInfo = info;
     $('appVer').textContent = 'v' + info.version;
     $('maker').textContent = info.maker;
     cfg = await api.load_config();
@@ -660,6 +954,9 @@
     bindPromptTabs();
     bindStage1();
     bindStage2();
+    bindViewer();
+    bindUpdate();
+    api.check_update();
     loadGuide();
     refreshBalance();
     const noKeys = !cfg.clova_url || !cfg.clova_secret || !cfg.openrouter_key;
