@@ -16,10 +16,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -75,7 +75,7 @@ jobs:
           if (-not (Test-Path $exe)) { Write-Error "exe가 없음"; exit 1 }
 
       - name: Upload executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: akpil-windows
           path: dist/악필교정기.exe
@@ -89,7 +89,7 @@ jobs:
       contents: write
     steps:
       - name: Download executable
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: akpil-windows
           path: dist
@@ -123,10 +123,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download executable
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: akpil-windows
           path: dist
