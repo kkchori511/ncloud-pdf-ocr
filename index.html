@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>악필교정기 내려받기</title>
+<link rel="icon" href="face.png">
+<style>
+  :root { --bg: #dfe6ee; --card: #f4f7fa; --text: #17202b; --text-2: #445264; --muted: #7d8a99; --border: #c9d3de; --accent: #2563eb; --accent-hover: #1d4fd0; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.6;
+    font-family: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 48px auto; padding: 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 32px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(23, 32, 43, .06); }
+  .hero { text-align: center; }
+  .hero img { width: 128px; height: 128px; }
+  h1 { margin: 8px 0 0; font-size: 30px; }
+  h1 small { font-size: 18px; color: var(--text-2); font-weight: 700; }
+  .tag { color: var(--text-2); margin: 6px 0 0; }
+  .maker { font-weight: 700; margin-top: 10px; }
+  .dl { display: inline-block; margin-top: 22px; padding: 14px 34px; border-radius: 12px; background: var(--accent); color: #fff; font-size: 18px; font-weight: 800; text-decoration: none; }
+  .dl:hover { background: var(--accent-hover); }
+  .sub { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  .sub a { color: var(--accent-hover); }
+  h2 { font-size: 19px; margin: 0 0 12px; }
+  li { margin-bottom: 6px; }
+  .notes h3 { font-size: 16px; margin: 14px 0 6px; color: var(--text); }
+  .notes h3:first-child { margin-top: 0; }
+  .notes ul { margin: 0; padding-left: 20px; }
+  .notes p { margin: 6px 0; }
+  .notes a { color: var(--accent-hover); }
+  .notes { overflow-wrap: anywhere; font-size: 14px; font-family: inherit; line-height: 1.7; color: var(--text-2); background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0; }
+  code { background: #fff; border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; font-size: .9em; }
+</style>
+</head>
+<body>
+<main>
+  <section class="card hero">
+    <img src="face.png" alt="">
+    <h1>악필교정기 <small>v1.2.1</small></h1>
+    <p class="tag">손글씨 과제 스캔을 OCR(CLOVA·Qwen)로 읽고 AI로 다듬어 엑셀로 정리합니다.</p>
+    <div class="maker">Made by 김한량 디지털 공방</div>
+    <a class="dl" href="Akpil-1.2.1.exe" download="악필교정기.exe">Windows용 내려받기 (v1.2.1)</a>
+    <div class="sub">받은 파일 이름을 <code>악필교정기.exe</code>로 두고 원하는 폴더에 넣어 실행하세요. · <a href="https://github.com/kkchori511/ncloud-pdf-ocr/releases/latest">GitHub 릴리스에서 받기</a></div>
+  </section>
+
+  <section class="card">
+    <h2>처음 쓰는 방법</h2>
+    <ol>
+      <li>내려받은 exe를 <b>원하는 폴더</b>(예: 문서 폴더 안 '악필교정기')에 넣고 실행합니다. 설정 파일이 그 폴더에 생깁니다.</li>
+      <li>Windows가 "PC 보호" 창을 띄우면 <b>추가 정보 → 실행</b>을 누릅니다.</li>
+      <li>프로그램의 <b>설정</b>에서 가입·키 발급 안내를 따라 본인의 CLOVA OCR 키와 OpenRouter 키를 넣습니다.</li>
+      <li>새 버전이 나오면 프로그램 위쪽에 알림이 뜹니다. [지금 업데이트]를 누르면 바뀝니다. 설정과 키는 그대로 남습니다.</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>나눠 줄 때</h2>
+    <ul>
+      <li>이 페이지 주소를 알려 주세요.</li>
+      <li>파일을 직접 줄 때는 <b>exe 파일만</b> 전달하세요. 키는 exe 옆 <code>악필교정기_설정.json</code>에 평문으로 저장되어, 폴더째 주면 내 키도 함께 넘어갑니다.</li>
+      <li>API 키는 본인이 발급받은 키만 사용해야 합니다.</li>
+    </ul>
+  </section>
+
+  <section class="card" id="notesCard" hidden>
+    <h2>바뀐 내용</h2>
+    <div class="notes" id="notes"></div>
+  </section>
+</main>
+<script>
+  // 릴리스 노트의 간단한 마크다운(제목, 목록, 굵게, 주소)만 그린다. 글은 먼저 이스케이프한다.
+  function renderNotes(md) {
+    const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const inline = (t) => esc(t)
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/(https:\/\/[^\s)<]+)/g, '<a href="$1">$1</a>');
+    let html = '', list = false;
+    for (const line of md.split('\n')) {
+      const h = line.match(/^#{1,6}\s+(.*)$/);
+      const li = line.match(/^\s*[-*]\s+(.*)$/);
+      if (!li && list) { html += '</ul>'; list = false; }
+      if (h) html += `<h3>${inline(h[1])}</h3>`;
+      else if (li) { if (!list) { html += '<ul>'; list = true; } html += `<li>${inline(li[1])}</li>`; }
+      else if (line.trim()) html += `<p>${inline(line)}</p>`;
+    }
+    return html + (list ? '</ul>' : '');
+  }
+  // 최신 릴리스 노트(GitHub API). 못 읽으면 칸을 숨긴 채 둔다.
+  fetch('https://api.github.com/repos/kkchori511/ncloud-pdf-ocr/releases/latest')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d || !d.body) return;
+      const body = d.body.replace(/\r/g, '').split('\n').filter((l) => !/^\*\*Full Changelog/.test(l)).join('\n').trim();
+      if (!body) return;
+      document.getElementById('notes').innerHTML = renderNotes(body);
+      document.getElementById('notesCard').hidden = false;
+    })
+    .catch(() => {});
+</script>
+</body>
+</html>
